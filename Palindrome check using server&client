@@ -1,0 +1,184 @@
+[24bcs170@mepcolinux Self]$cat server.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <ctype.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+#define PORT 8080
+#define BUFFER_SIZE 1024
+
+// Function to check if a string is a palindrome (ignoring spaces and case)
+int is_palindrome(char *str) {
+    int left = 0;
+    int right = strlen(str) - 1;
+
+    // Strip trailing newline characters from network stream
+    while (right >= 0 && (str[right] == '\n' || str[right] == '\r')) {
+        str[right] = '\0';
+        right--;
+    }
+
+    while (left < right) {
+        // Skip spaces and non-alphanumeric characters from left
+        while (left < right && !isalnum((unsigned char)str[left])) left++;
+        // Skip spaces and non-alphanumeric characters from right
+        while (left < right && !isalnum((unsigned char)str[right])) right--;
+
+        if (tolower((unsigned char)str[left]) != tolower((unsigned char)str[right])) {
+            return 0; // Not a palindrome
+        }
+        left++;
+        right--;
+    }
+    return 1; // It is a palindrome
+}
+
+int main() {
+    int server_fd, new_socket;
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
+    char buffer[BUFFER_SIZE] = {0};
+
+    // 1. Create TCP Socket
+    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Allow quick reuse of the port
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    // 2. Define Server Bind Address
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY; 
+    address.sin_port = htons(PORT);
+
+    // 3. Bind Socket to Port
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        perror("Bind failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // 4. Listen for Incoming Connections
+    if (listen(server_fd, 5) < 0) {
+        perror("Listen failed");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Palindrome TCP Server running on port %d...\n", PORT);
+
+    // 5. Main Server Loop
+    while (1) {
+        new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen);
+        if (new_socket < 0) {
+            perror("Accept failed");
+            continue;
+        }
+
+        // Fork process to handle concurrent clients
+        if (fork() == 0) {
+            close(server_fd); // Child process does not need the listener socket
+            
+            while (1) {
+                memset(buffer, 0, BUFFER_SIZE);
+                int valread = recv(new_socket, buffer, BUFFER_SIZE, 0);
+                
+                // Client disconnected or error
+                if (valread <= 0) {
+                    break; 
+                }
+
+                printf("Received text from client: %s\n", buffer);
+
+                // Process input and check for palindrome
+                char *response;
+                if (is_palindrome(buffer)) {
+                    response = "YES, it is a palindrome.\n";
+                } else {
+                    response = "NO, it is not a palindrome.\n";
+                }
+
+                // Send result back to client
+                send(new_socket, response, strlen(response), 0);
+            }
+
+            close(new_socket);
+            exit(0); // Terminate child process when client disconnects
+        }
+        close(new_socket); // Parent process closes its handle to this client socket
+    }
+
+    return 0;
+}
+
+[24bcs170@mepcolinux Self]$cat client.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+#define PORT 8080
+#define BUFFER_SIZE 1024
+
+int main() {
+    int sock = 0;
+    struct sockaddr_in serv_addr;
+    char buffer[BUFFER_SIZE] = {0};
+    char message[BUFFER_SIZE];
+
+    // 1. Create TCP Socket
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        printf("\n Socket creation error \n");
+        return -1;
+    }
+
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT);
+
+    // Convert IPv4 address from text to binary format (Localhost)
+    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
+        printf("\nInvalid address/ Address not supported \n");
+        return -1;
+    }
+
+    // 2. Connect to Palindrome Server
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        printf("\nConnection Failed \n");
+        return -1;
+    }
+
+    printf("Connected to Palindrome Server. Type 'exit' to quit.\n");
+
+    // 3. Data Transfer Loop
+    while (1) {
+        printf("Enter string to check: ");
+        fgets(message, BUFFER_SIZE, stdin);
+
+        // Remove trailing newline character
+        message[strcspn(message, "\n")] = 0;
+
+        if (strcmp(message, "exit") == 0) {
+            break;
+        }
+
+        // Send to server
+        send(sock, message, strlen(message), 0);
+
+        // Receive response
+        memset(buffer, 0, BUFFER_SIZE);
+        int valread = recv(sock, buffer, BUFFER_SIZE, 0);
+        if (valread > 0) {
+            printf("Server Response: %s", buffer);
+        }
+    }
+
+    close(sock);
+    return 0;
+}
+
