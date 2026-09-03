@@ -1,0 +1,161 @@
+
+[24bcs170@mepcolinux Self]$cat server1.c
+#include "common.h"
+
+void log_transaction(const char *msg) {
+    FILE *log_file = fopen("server_log.txt", "a");
+    time_t now = time(NULL);
+    char *ts = ctime(&now);
+    ts[strlen(ts)-1] = '\0';
+    fprintf(log_file, "[%s] %s\n", ts, msg);
+    fclose(log_file);
+}
+
+void handle_client(int client_sock) {
+    Request req;
+    while (recv(client_sock, &req, sizeof(Request), 0) > 0) {
+        Response res = {0};
+        FILE *fp;
+
+        if (req.cmd == EXIT) break;
+
+        printf("[LOG] Processing Command: %d for RegNo: %d\n", req.cmd, req.target_reg_no);
+
+        if (req.cmd == ADD) {
+            fp = fopen("students.dat", "ab");
+            fwrite(&req.data, sizeof(Student), 1, fp);
+            fclose(fp);
+            res.success = 1;
+            strcpy(res.message, "Record added successfully!");
+            log_transaction("ADD Record");
+        } 
+        else if (req.cmd == SEARCH) {
+            fp = fopen("students.dat", "rb");
+            int found = 0;
+            while (fread(&res.data, sizeof(Student), 1, fp)) {
+                if (res.data.reg_no == req.target_reg_no) {
+                    found = 1; break;
+                }
+            }
+            fclose(fp);
+            res.success = found;
+            strcpy(res.message, found ? "Found" : "Not Found");
+        }
+        else if (req.cmd == DISPLAY_ALL) {
+            // For display all, we send records one by one
+            fp = fopen("students.dat", "rb");
+            res.count = 1; // Signal there's more
+            while (fread(&res.data, sizeof(Student), 1, fp)) {
+                res.success = 1;
+                send(client_sock, &res, sizeof(Response), 0);
+            }
+            res.count = 0; // Signal end
+            res.success = 0;
+        }
+        else if (req.cmd == TOPPER) {
+            fp = fopen("students.dat", "rb");
+            Student s, top; float max = -1.0; int found = 0;
+            while (fread(&s, sizeof(Student), 1, fp)) {
+                if (s.cgpa > max) { max = s.cgpa; top = s; found = 1; }
+            }
+            fclose(fp);
+            res.data = top; res.success = found;
+        }
+
+        if (req.cmd != DISPLAY_ALL) {
+            send(client_sock, &res, sizeof(Response), 0);
+        }
+        printf("[LOG] Response sent.\n");
+    }
+    close(client_sock);
+}
+
+int main() {
+    int server_fd, client_sock;
+    struct sockaddr_in addr;
+    int opt = 1;
+    int addrlen = sizeof(addr);
+
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(PORT);
+
+    bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
+    listen(server_fd, 3);
+
+    printf("Server listening on port %d...\n", PORT);
+
+    while ((client_sock = accept(server_fd, (struct sockaddr *)&addr, (socklen_t*)&addrlen))) {
+        printf("Client Connected!\n");
+        handle_client(client_sock);
+        printf("Client Disconnected.\n");
+    }
+    return 0;
+}
+[24bcs170@mepcolinux Self]$cat client1.c
+#include "common.h"
+
+void print_student(Student s) {
+    printf("\n----------------------------------");
+    printf("\nReg No: %d\nName: %s\nDept: %s\nSem: %d\nMarks: %.2f\nGrade: %s\nCGPA: %.2f", 
+           s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+}
+
+int main() {
+    int sock;
+    struct sockaddr_in serv_addr;
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT);
+    inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
+
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        printf("Connection failed!\n");
+        return -1;
+    }
+
+    int choice;
+    while (1) {
+        printf("\n\n--- STUDENT SYSTEM ---\n1. Add\n2. Search\n3. Display All\n4. Topper\n5. Exit\nChoice: ");
+        scanf("%d", &choice);
+
+        Request req = {0};
+        Response res = {0};
+        req.cmd = (Command)choice;
+
+        if (choice == 1) {
+            printf("Enter RegNo Name Dept Sem Marks Grade CGPA: ");
+            scanf("%d %s %s %d %f %s %f", &req.data.reg_no, req.data.name, req.data.dept, 
+                  &req.data.semester, &req.data.marks, req.data.grade, &req.data.cgpa);
+        } else if (choice == 2) {
+            printf("Enter RegNo to Search: ");
+            scanf("%d", &req.target_reg_no);
+        } else if (choice == 5) {
+            send(sock, &req, sizeof(Request), 0);
+            break;
+        }
+
+        send(sock, &req, sizeof(Request), 0);
+
+        if (choice == 3) {
+            while (recv(sock, &res, sizeof(Response), 0) > 0 && res.count != 0) {
+                print_student(res.data);
+            }
+        } else {
+            recv(sock, &res, sizeof(Response), 0);
+            if (res.success) {
+                if (choice == 1) printf("%s", res.message);
+                else print_student(res.data);
+            } else {
+                printf("Error/Not Found!");
+            }
+        }
+    }
+    close(sock);
+    return 0;
+}
+[24bcs170@mepcolinux Self]$
