@@ -1,0 +1,286 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <winsock2.h>
+#include <windows.h>
+#include <time.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#define PORT 8080
+#define MAX_CLIENTS 50
+#define BUFFER_SIZE 1024
+
+// Critical Section for Thread Safety (Log File)
+CRITICAL_SECTION log_lock;
+
+// Simple User Database (Username|Password)
+const char* users[][2] = {
+    {"student1", "pass1"},
+    {"student2", "pass2"},
+    {"student3", "pass3"}
+};
+int user_count = 3;
+
+// Question Database
+const char* questions[] = {
+    "Q1: What is 2 + 2?",
+    "Q2: Capital of India?",
+    "Q3: C language developed by?"
+};
+const char* answers[] = {"4", "Delhi", "Dennis Ritchie"};
+int q_count = 3;
+
+// Thread Function Structure
+typedef struct {
+    SOCKET client_socket;
+    char username[50];
+} ClientData;
+
+// Function to Log Activities
+void log_activity(char* username, char* activity) {
+    EnterCriticalSection(&log_lock); // Lock
+    FILE* f = fopen("exam_log.txt", "a");
+    if (f) {
+        time_t t = time(NULL);
+        fprintf(f, "[%s] User: %s - %s\n", ctime(&t), username, activity);
+        fclose(f);
+    }
+    LeaveCriticalSection(&log_lock); // Unlock
+}
+
+// Client Handler Thread
+DWORD WINAPI ClientHandler(LPVOID lpParam) {
+    ClientData* data = (ClientData*)lpParam;
+    SOCKET client_socket = data->client_socket;
+    char buffer[BUFFER_SIZE], response[BUFFER_SIZE];
+    int authenticated = 0;
+    int score = 0;
+
+    printf("New client connected.\n");
+
+    // 1. Authentication Loop
+    while (!authenticated) {
+        memset(buffer, 0, BUFFER_SIZE);
+        recv(client_socket, buffer, BUFFER_SIZE, 0);
+        
+        // Format: "LOGIN|username|password"
+        char cmd[20], user[50], pass[50];
+        sscanf(buffer, "%[^|]|%[^|]|%s", cmd, user, pass);
+
+        if (strcmp(cmd, "LOGIN") == 0) {
+            int valid = 0;
+            for (int i = 0; i < user_count; i++) {
+                if (strcmp(users[i][0], user) == 0 && strcmp(users[i][1], pass) == 0) {
+                    valid = 1;
+                    strcpy(data->username, user);
+                    break;
+                }
+            }
+            if (valid) {
+                authenticated = 1;
+                sprintf(response, "SUCCESS|Welcome %s", user);
+                log_activity(user, "Logged In");
+            } else {
+                sprintf(response, "FAIL|Invalid Credentials");
+                log_activity(user, "Login Failed");
+            }
+            send(client_socket, response, strlen(response), 0);
+        }
+    }
+
+    // 2. Exam Loop
+    while (1) {
+        memset(buffer, 0, BUFFER_SIZE);
+        int n = recv(client_socket, buffer, BUFFER_SIZE, 0);
+        if (n <= 0) break; // Client disconnected
+
+        char cmd[20], param[50];
+        sscanf(buffer, "%[^|]|%s", cmd, param);
+
+        if (strcmp(cmd, "GET_QUESTIONS") == 0) {
+            char temp[BUFFER_SIZE] = "";
+            for (int i = 0; i < q_count; i++) {
+                strcat(temp, questions[i]);
+                strcat(temp, "\n");
+            }
+            send(client_socket, temp, strlen(temp), 0);
+            log_activity(data->username, "Viewed Questions");
+        }
+        else if (strcmp(cmd, "SUBMIT") == 0) {
+            // Format: SUBMIT|Q1_Answer|Q2_Answer|Q3_Answer
+            char* ans = strtok(param, "|");
+            int q_idx = 0;
+            while (ans != NULL && q_idx < q_count) {
+                if (strcmp(ans, answers[q_idx]) == 0) {
+                    score++;
+                }
+                ans = strtok(NULL, "|");
+                q_idx++;
+            }
+            sprintf(response, "SUBMITTED|Score Calculated");
+            send(client_socket, response, strlen(response), 0);
+            log_activity(data->username, "Submitted Answers");
+        }
+        else if (strcmp(cmd, "GET_SCORE") == 0) {
+            sprintf(response, "SCORE|Your Score: %d/%d", score, q_count);
+            send(client_socket, response, strlen(response), 0);
+            log_activity(data->username, "Viewed Score");
+        }
+        else if (strcmp(cmd, "EXIT") == 0) {
+            break;
+        }
+    }
+
+    log_activity(data->username, "Disconnected");
+    closesocket(client_socket);
+    free(data);
+    printf("Client disconnected.\n");
+    return 0;
+}
+
+int main() {
+    WSADATA wsaData;
+    SOCKET server_socket, client_socket;
+    struct sockaddr_in servaddr, cliaddr;
+    int len = sizeof(cliaddr);
+
+    // Init Winsock
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        printf("Winsock Init Failed\n"); return 1;
+    }
+
+    // Init Critical Section
+    InitializeCriticalSection(&log_lock);
+
+    // Create Socket
+    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket == INVALID_SOCKET) {
+        printf("Socket Creation Failed\n"); return 1;
+    }
+
+    // Bind
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    servaddr.sin_port = htons(PORT);
+
+    if (bind(server_socket, (const struct sockaddr*)&servaddr, sizeof(servaddr)) == SOCKET_ERROR) {
+        printf("Bind Failed\n"); return 1;
+    }
+
+    // Listen
+    listen(server_socket, 5);
+    printf("Exam Server Listening on Port %d...\n", PORT);
+
+    while (1) {
+        client_socket = accept(server_socket, (struct sockaddr*)&cliaddr, &len);
+        if (client_socket == INVALID_SOCKET) {
+            printf("Accept Failed\n"); continue;
+        }
+
+        // Create Thread for Client
+        ClientData* data = (ClientData*)malloc(sizeof(ClientData));
+        data->client_socket = client_socket;
+        memset(data->username, 0, 50);
+        
+        CreateThread(NULL, 0, ClientHandler, (LPVOID)data, 0, NULL);
+    }
+
+    closesocket(server_socket);
+    DeleteCriticalSection(&log_lock);
+    WSACleanup();
+    return 0;
+}
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <winsock2.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#define PORT 8080
+#define BUFFER_SIZE 1024
+
+int main() {
+    WSADATA wsaData;
+    SOCKET sockfd;
+    struct sockaddr_in servaddr;
+    char buffer[BUFFER_SIZE], input[BUFFER_SIZE];
+
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        printf("Winsock Init Failed\n"); return 1;
+    }
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == INVALID_SOCKET) {
+        printf("Socket Creation Failed\n"); return 1;
+    }
+
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_port = htons(PORT);
+    servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    if (connect(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
+        printf("Connection Failed\n"); return 1;
+    }
+
+    printf("--- Online Exam Client ---\n");
+
+    // 1. Login
+    char user[50], pass[50];
+    printf("Username: "); scanf("%s", user);
+    printf("Password: "); scanf("%s", pass);
+    
+    sprintf(input, "LOGIN|%s|%s", user, pass);
+    send(sockfd, input, strlen(input), 0);
+    
+    recv(sockfd, buffer, BUFFER_SIZE, 0);
+    printf("Server: %s\n", buffer);
+
+    if (strstr(buffer, "FAIL")) {
+        closesocket(sockfd);
+        return 1;
+    }
+
+    // 2. Exam Menu
+    while (1) {
+        printf("\n1. View Questions  2. Submit Answers  3. View Score  4. Exit\n");
+        printf("Choice: ");
+        int choice;
+        scanf("%d", &choice);
+        
+        memset(input, 0, BUFFER_SIZE);
+        if (choice == 1) {
+            sprintf(input, "GET_QUESTIONS|");
+        } else if (choice == 2) {
+            char a1[20], a2[20], a3[20];
+            printf("Ans for Q1: "); scanf("%s", a1);
+            printf("Ans for Q2: "); scanf("%s", a2);
+            printf("Ans for Q3: "); scanf("%s", a3);
+            sprintf(input, "SUBMIT|%s|%s|%s", a1, a2, a3);
+        } else if (choice == 3) {
+            sprintf(input, "GET_SCORE|");
+        } else if (choice == 4) {
+            sprintf(input, "EXIT|");
+            send(sockfd, input, strlen(input), 0);
+            break;
+        } else {
+            continue;
+        }
+
+        send(sockfd, input, strlen(input), 0);
+        memset(buffer, 0, BUFFER_SIZE);
+        recv(sockfd, buffer, BUFFER_SIZE, 0);
+        printf("Server: %s\n", buffer);
+    }
+
+    closesocket(sockfd);
+    WSACleanup();
+    return 0;
+}
+
+
