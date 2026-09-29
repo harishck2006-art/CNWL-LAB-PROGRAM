@@ -1,0 +1,273 @@
+[?1034h[24bcs170@mepcolinux GBN]$cat receiver.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+#define PORT 9445
+#define BUF 100
+
+struct Frame {
+    int seq;
+    int checksum;
+    char data[BUF];
+};
+
+struct Ack {
+    int ack;
+};
+
+int checksum(char *data, int seq) {
+    int sum = seq;
+    int i;
+    for (i = 0; data[i] != '\0'; i++) sum += data[i];
+    return sum;
+}
+
+int main() {
+    int serverSock, clientSock;
+    struct sockaddr_in server, client;
+    socklen_t len;
+    int expected = 0;
+    int lostFrame, errorFrame;
+
+    printf("Enter frame number to simulate LOSS (-1 for none): ");
+    scanf("%d", &lostFrame);
+
+    printf("Enter frame number to simulate ERROR (-1 for none): ");
+    scanf("%d", &errorFrame);
+
+    serverSock = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSock < 0) { perror("Socket"); exit(1); }
+
+    int opt = 1;
+    setsockopt(serverSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    server.sin_family = AF_INET;
+    server.sin_port = htons(PORT);
+    server.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(serverSock, (struct sockaddr *)&server, sizeof(server)) < 0) {
+        perror("Bind");
+        exit(1);
+    }
+
+    listen(serverSock, 5);
+    printf("\nReceiver waiting...\n");
+
+    len = sizeof(client);
+    clientSock = accept(serverSock, (struct sockaddr *)&client, &len);
+    if (clientSock < 0) { perror("Accept"); exit(1); }
+    printf("Sender connected.\n\n");
+
+    while (1) {
+        struct Frame f;
+        struct Ack ack;
+        int n = recv(clientSock, &f, sizeof(f), 0);
+
+        if (n <= 0) break;
+
+        if (lostFrame != -1 && f.seq == lostFrame) {
+            printf("* Frame %d LOST *\n", f.seq);
+            lostFrame = -1;
+            continue;
+        }
+
+        if (errorFrame != -1 && f.seq == errorFrame) {
+            printf("* Frame %d contains ERROR *\n", f.seq);
+            f.checksum += 999;
+            errorFrame = -1;
+        }
+
+        if (f.checksum != checksum(f.data, f.seq)) {
+            printf("Checksum ERROR detected in frame %d\n", f.seq);
+            printf("Frame discarded.\n");
+            ack.ack = expected - 1;
+            send(clientSock, &ack, sizeof(ack), 0);
+            printf("Receiver -> ACK %d\n\n", ack.ack);
+            continue;
+        }
+
+        if (f.seq == expected) {
+            printf("Receiver <- Frame %d received: %s\n", f.seq, f.data);
+            ack.ack = f.seq;
+            expected++;
+            send(clientSock, &ack, sizeof(ack), 0);
+            printf("Receiver -> ACK %d\n\n", ack.ack);
+        } else {
+            printf("Out-of-order frame %d received. Expected = %d (Discarded).\n", f.seq, expected);
+            ack.ack = expected - 1;
+            send(clientSock, &ack, sizeof(ack), 0);
+            printf("Receiver -> ACK %d\n\n", ack.ack);
+        }
+    }
+
+    close(clientSock);
+    close(serverSock);
+    return 0;
+}
+
+[24bcs170@mepcolinux GBN]$cat sender.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+
+#define PORT 9445
+#define BUF 100
+#define WINDOW_SIZE 4
+#define TIMEOUT 3
+
+struct Frame {
+    int seq;
+    int checksum;
+    char data[BUF];
+};
+
+struct Ack {
+    int ack;
+};
+
+struct Node {
+    struct Frame frame;
+    struct Node *next;
+};
+
+struct Queue {
+    struct Node *front;
+    struct Node *rear;
+};
+
+void initQueue(struct Queue *q) {
+    q->front = NULL;
+    q->rear = NULL;
+}
+
+void enqueue(struct Queue *q, struct Frame f) {
+    struct Node *newNode = (struct Node *)malloc(sizeof(struct Node));
+    newNode->frame = f;
+    newNode->next = NULL;
+    if (q->rear == NULL) {
+        q->front = q->rear = newNode;
+    } else {
+        q->rear->next = newNode;
+        q->rear = newNode;
+    }
+}
+
+void dequeue(struct Queue *q) {
+    if (q->front == NULL) return;
+    struct Node *temp = q->front;
+    q->front = q->front->next;
+    if (q->front == NULL) q->rear = NULL;
+    free(temp);
+}
+
+int checksum(char *data, int seq) {
+    int sum = seq;
+    int i;
+    for (i = 0; data[i] != '\0'; i++) sum += data[i];
+    return sum;
+}
+
+void sendFrame(int sock, struct Frame *f) {
+    send(sock, f, sizeof(struct Frame), 0);
+    printf("Sender -> Frame %d sent : %s\n", f->seq, f->data);
+}
+
+int main() {
+    int sock;
+    struct sockaddr_in server;
+    struct Queue queue;
+    int total, base = 0;
+    char message[BUF];
+    int i;
+
+    initQueue(&queue);
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) { perror("Socket"); exit(1); }
+
+    server.sin_family = AF_INET;
+    server.sin_port = htons(PORT);
+    server.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    if (connect(sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
+        perror("Connection");
+        exit(1);
+    }
+    printf("Connected to receiver.\n");
+
+    printf("Enter number of frames: ");
+    scanf("%d", &total);
+    getchar();
+
+    for (i = 0; i < total; i++) {
+        struct Frame f;
+        f.seq = i;
+        printf("Enter data for frame %d: ", i);
+        fgets(message, BUF, stdin);
+        message[strcspn(message, "\n")] = '\0';
+        strcpy(f.data, message);
+        f.checksum = checksum(f.data, f.seq);
+        enqueue(&queue, f);
+    }
+
+    printf("\nStarting Go-Back-N...\n\n");
+
+    struct timeval tv;
+    tv.tv_sec = TIMEOUT;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    while (base < total) {
+        struct Node *temp = queue.front;
+        int count = 0;
+
+        while (temp != NULL && count < WINDOW_SIZE) {
+            sendFrame(sock, &temp->frame);
+            temp = temp->next;
+            count++;
+        }
+
+        struct Ack ack;
+        int n = recv(sock, &ack, sizeof(ack), 0);
+
+        if (n <= 0) {
+            printf("\n** TIMEOUT **\n");
+            printf("No ACK received for frame %d\n", base);
+            printf("Go-Back-N: retransmitting from frame %d\n\n", base);
+            sleep(1);
+            continue;
+        }
+
+        printf("Sender <- ACK %d received\n", ack.ack);
+
+        if (ack.ack >= base || (base == 0 && ack.ack == -1)) {
+            int removeCount = (ack.ack == -1) ? 0 : (ack.ack - base + 1);
+            int r;
+            for (r = 0; r < removeCount; r++) {
+                dequeue(&queue);
+            }
+            base = ack.ack + 1;
+            printf("Window moved. New base = %d\n\n", base);
+        } else {
+            printf("Duplicate or Old ACK (%d) ignored. Retransmitting window...\n\n", ack.ack);
+            sleep(1);
+        }
+    }
+
+    printf("All frames successfully transmitted.\n");
+    close(sock);
+    return 0;
+}
+
+[24bcs170@mepcolinux GBN]$./receiver
+Enter frame number to simulate LOSS (-1 for none): 2
+Enter frame number to simulate ERROR (-1 for none): -1
+
+Receiver waiting...
