@@ -1,0 +1,175 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+
+#define SIM_TIME 1000       // Simulation Rounds (RTTs)
+#define BANDWIDTH 1000      // Bottleneck Capacity (packets per RTT)
+#define INITIAL_CWND 10     // Initial Window
+#define CUBIC_C 0.4         // Cubic Constant
+#define LOSS_PROB 0.05      // Probability of Loss when congested
+
+// TCP Flow Structure
+typedef struct {
+    char name[20];
+    int algo_type;          // 1 = NewReno, 2 = Cubic
+    double cwnd;            // Congestion Window
+    double ssthresh;        // Slow Start Threshold
+    double w_max;           // Max CWND before last loss (for Cubic)
+    double k;               // Time to reach W_max (for Cubic)
+    int t_since_loss;       // Time elapsed since last loss (for Cubic)
+    long total_packets;     // Total packets sent
+    long lost_packets;      // Total packets lost
+    double throughput;      // Average Throughput
+} TCPFlow;
+
+// File pointers for graphing
+FILE *f_newreno, *f_cubic;
+
+// Initialize Flow
+void init_flow(TCPFlow *flow, char *name, int type) {
+    strcpy(flow->name, name);
+    flow->algo_type = type;
+    flow->cwnd = INITIAL_CWND;
+    flow->ssthresh = BANDWIDTH / 2;
+    flow->w_max = 0;
+    flow->k = 0;
+    flow->t_since_loss = 0;
+    flow->total_packets = 0;
+    flow->lost_packets = 0;
+    flow->throughput = 0;
+}
+
+// Update NewReno CWND
+void update_newreno(TCPFlow *flow, int loss_detected) {
+    if (loss_detected) {
+        flow->ssthresh = flow->cwnd / 2;
+        if (flow->ssthresh < 2) flow->ssthresh = 2;
+        flow->cwnd = 1; // Reset to 1 (Tahoe/NewReno behavior)
+    } else {
+        if (flow->cwnd < flow->ssthresh) {
+            flow->cwnd *= 2; // Slow Start
+        } else {
+            flow->cwnd += 1; // Congestion Avoidance (AIMD)
+        }
+    }
+}
+
+// Update Cubic CWND
+void update_cubic(TCPFlow *flow, int loss_detected) {
+    if (loss_detected) {
+        flow->w_max = flow->cwnd;
+        flow->k = pow(flow->w_max * (1 - 0.7) / CUBIC_C, 1.0/3.0);
+        flow->ssthresh = flow->cwnd * 0.7; // Multiplicative Decrease
+        flow->cwnd = flow->ssthresh;
+        flow->t_since_loss = 0;
+    } else {
+        flow->t_since_loss++;
+        // Cubic Function: W(t) = C * (t - K)^3 + W_max
+        double t = flow->t_since_loss;
+        double cubic_cwnd = CUBIC_C * pow(t - flow->k, 3) + flow->w_max;
+        
+        // TCP Friendliness check (simplified)
+        if (cubic_cwnd > flow->cwnd) {
+            flow->cwnd = cubic_cwnd;
+        } else {
+            flow->cwnd += 0.5; // Minimum increase
+        }
+    }
+}
+
+int main() {
+    TCPFlow flow1, flow2;
+    int i;
+    double total_demand, loss_rate;
+    
+    // Initialize Flows
+    init_flow(&flow1, "NewReno", 1);
+    init_flow(&flow2, "Cubic", 2);
+
+    // Open Files for Plotting
+    f_newreno = fopen("newreno_cwnd.txt", "w");
+    f_cubic = fopen("cubic_cwnd.txt", "w");
+    fprintf(f_newreno, "# RTT\tCWND\n");
+    fprintf(f_cubic, "# RTT\tCWND\n");
+
+    printf("=== TCP NewReno vs Cubic Comparison ===\n");
+    printf("Bandwidth Capacity: %d packets/RTT\n\n", BANDWIDTH);
+    printf("%-5s %-10s %-10s %-10s %-10s\n", "RTT", "NR-CWND", "CB-CWND", "Status", "Action");
+    printf("------------------------------------------------------------\n");
+
+    srand(time(NULL));
+
+    // Simulation Loop
+    for (i = 0; i < SIM_TIME; i++) {
+        // 1. Calculate Total Demand
+        total_demand = flow1.cwnd + flow2.cwnd;
+        
+        // 2. Check Congestion (If demand > bandwidth)
+        int loss_detected_1 = 0;
+        int loss_detected_2 = 0;
+
+        if (total_demand > BANDWIDTH) {
+            // Congestion Occurred
+            // Randomly assign loss or share loss
+            if ((double)rand() / RAND_MAX < LOSS_PROB) {
+                loss_detected_1 = 1;
+                flow1.lost_packets += (long)flow1.cwnd;
+            }
+            if ((double)rand() / RAND_MAX < LOSS_PROB) {
+                loss_detected_2 = 1;
+                flow2.lost_packets += (long)flow2.cwnd;
+            }
+        }
+
+        // 3. Update CWND based on Algorithm
+        update_newreno(&flow1, loss_detected_1);
+        update_cubic(&flow2, loss_detected_2);
+
+        // 4. Record Packets Sent
+        flow1.total_packets += (long)flow1.cwnd;
+        flow2.total_packets += (long)flow2.cwnd;
+
+        // 5. Log Data
+        fprintf(f_newreno, "%d\t%.2f\n", i, flow1.cwnd);
+        fprintf(f_cubic, "%d\t%.2f\n", i, flow2.cwnd);
+
+        // 6. Print Status (Every 50 RTTs)
+        if (i % 50 == 0) {
+            printf("%-5d %-10.2f %-10.2f %-10s %-10s\n", 
+                   i, flow1.cwnd, flow2.cwnd, 
+                   (total_demand > BANDWIDTH) ? "Congested" : "Stable",
+                   (loss_detected_1 || loss_detected_2) ? "Loss Occurred" : "Normal");
+        }
+    }
+
+    // Close Files
+    fclose(f_newreno);
+    fclose(f_cubic);
+
+    // Calculate Final Metrics
+    flow1.throughput = (double)flow1.total_packets / SIM_TIME;
+    flow2.throughput = (double)flow2.total_packets / SIM_TIME;
+
+    double total_throughput = flow1.throughput + flow2.throughput;
+    
+    // Jain's Fairness Index: (Sum(x))^2 / (n * Sum(x^2))
+    double sum_x = flow1.throughput + flow2.throughput;
+    double sum_x2 = (flow1.throughput * flow1.throughput) + (flow2.throughput * flow2.throughput);
+    double fairness_index = (sum_x * sum_x) / (2 * sum_x2);
+
+    // Print Results
+    printf("\n=== Final Results ===\n");
+    printf("Metric\t\t\tNewReno\t\tCubic\n");
+    printf("--------------------------------------------\n");
+    printf("Total Packets\t\t%ld\t\t%ld\n", flow1.total_packets, flow2.total_packets);
+    printf("Lost Packets\t\t%ld\t\t%ld\n", flow1.lost_packets, flow2.lost_packets);
+    printf("Avg Throughput\t\t%.2f pkts/RTT\t%.2f pkts/RTT\n", flow1.throughput, flow2.throughput);
+    printf("Packet Loss Rate\t%.2f%%\t\t%.2f%%\n", 
+           (flow1.total_packets>0)?(float)flow1.lost_packets/flow1.total_packets*100:0,
+           (flow2.total_packets>0)?(float)flow2.lost_packets/flow2.total_packets*100:0);
+    printf("\nJain's Fairness Index: %.4f (1.0 = Perfect Fairness)\n", fairness_index);
+    printf("Data saved to 'newreno_cwnd.txt' and 'cubic_cwnd.txt'\n");
+
+    return 0;
+}
