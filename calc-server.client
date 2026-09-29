@@ -1,0 +1,162 @@
+[24bcs170@mepcolinux P1]$cat server.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define PORT 8080
+
+struct Packet {
+    double num1;
+    double num2;
+    char op;
+    double result;
+    int status;
+};
+
+int main() {
+    int sockfd;
+    struct sockaddr_in server_addr, client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+    struct Packet pkt;
+
+    // 1. Create UDP Socket
+    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // 2. Configure Server Address
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(PORT);
+
+    // 3. Bind Socket to Port
+    if (bind(sockfd, (const struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Bind failed");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("UDP Math Server is running on port %d...\n", PORT);
+
+    // 4. Infinite Loop to Listen and Process Requests
+    while (1) {
+        int n = recvfrom(sockfd, &pkt, sizeof(pkt), 0, (struct sockaddr *)&client_addr, &addr_len);
+        if (n < 0) {
+            perror("Receive failed");
+            continue;
+        }
+
+        printf("Received request: %lf %c %lf\n", pkt.num1, pkt.op, pkt.num2);
+        pkt.status = 0; // Default: Success
+
+        // 5. Perform Math Operations & Validation
+        switch (pkt.op) {
+            case '+': pkt.result = pkt.num1 + pkt.num2; break;
+            case '-': pkt.result = pkt.num1 - pkt.num2; break;
+            case '*': pkt.result = pkt.num1 * pkt.num2; break;
+            case '/':
+                if (pkt.num2 == 0) {
+                    pkt.status = -1; // Division by zero error code
+                    pkt.result = 0;
+                } else {
+                    pkt.result = pkt.num1 / pkt.num2;
+                }
+                break;
+            default:
+                pkt.status = -2; // Invalid operator error code
+                pkt.result = 0;
+                break;
+        }
+
+        // 6. Send Result Back to Client
+        sendto(sockfd, &pkt, sizeof(pkt), 0, (struct sockaddr *)&client_addr, addr_len);
+    }
+
+    close(sockfd);
+    return 0;
+}
+
+[24bcs170@mepcolinux P1]$cat client.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define PORT 8080
+#define SERVER_IP "127.0.0.1"
+
+struct Packet {
+    double num1;
+    double num2;
+    char op;
+    double result;
+    int status;
+};
+
+int main() {
+    int sockfd;
+    struct sockaddr_in server_addr;
+    socklen_t addr_len = sizeof(server_addr);
+    struct Packet pkt;
+    char choice;
+
+    // 1. Create UDP Socket
+    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // 2. Configure Destination Server Address
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PORT);
+    inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
+
+    // 3. Main Loop for Performing Operations
+    while (1) {
+        printf("\n--- UDP Calculator Client ---\n");
+        printf("Enter first number: ");
+        if (scanf("%lf", &pkt.num1) != 1) break;
+
+        printf("Enter operator (+, -, *, /): ");
+        scanf(" %c", &pkt.op);
+
+        printf("Enter second number: ");
+        if (scanf("%lf", &pkt.num2) != 1) break;
+
+        // Send data packet to server
+        sendto(sockfd, &pkt, sizeof(pkt), 0, (const struct sockaddr *)&server_addr, addr_len);
+
+        // Receive processed packet back from server
+        int n = recvfrom(sockfd, &pkt, sizeof(pkt), 0, (struct sockaddr *)&server_addr, &addr_len);
+        if (n < 0) {
+            perror("Error receiving from server");
+            continue;
+        }
+
+        // 4. Handle Server Response Status
+        if (pkt.status == 0) {
+            printf("Result from server: %lf\n", pkt.result);
+        } else if (pkt.status == -1) {
+            printf("Server Error: Division by Zero is not allowed!\n");
+        } else if (pkt.status == -2) {
+            printf("Server Error: Invalid operator supplied!\n");
+        }
+
+        // 5. Exit Prompt
+        printf("\nDo you want to perform another operation? (y/n): ");
+        scanf(" %c", &choice);
+        if (choice == 'n' || choice == 'N') {
+            break;
+        }
+    }
+
+    printf("Exiting client application...\n");
+    close(sockfd);
+    return 0;
+}
