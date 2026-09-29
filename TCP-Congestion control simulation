@@ -1,0 +1,124 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <string.h>
+
+#define MAX_RTT 100          // Simulation Rounds
+#define INITIAL_CWND 1       // Initial Congestion Window
+#define INITIAL_SSTHRESH 50  // Initial Slow Start Threshold
+#define PACKET_SIZE 1000     // Bytes
+#define LOSS_PROBABILITY 0.1 // 10% chance of packet loss
+
+// Structure to hold TCP State
+typedef struct {
+    int cwnd;             // Congestion Window
+    int ssthresh;         // Slow Start Threshold
+    int rtt;              // Round Trip Time count
+    int total_packets;    // Total packets sent
+    int lost_packets;     // Total packets lost
+    int acknowledged;     // Total packets ACKed
+} TCPState;
+
+// Function to simulate Packet Loss
+int simulate_packet_loss() {
+    double rand_val = (double)rand() / RAND_MAX;
+    return (rand_val < LOSS_PROBABILITY) ? 1 : 0;
+}
+
+// Function to log data to file for plotting
+void log_data(FILE *f, int rtt, int cwnd) {
+    fprintf(f, "%d\t%d\n", rtt, cwnd);
+}
+
+int main() {
+    TCPState tcp;
+    FILE *logFile;
+    int i;
+    int loss_event;
+
+    // Initialize TCP State
+    tcp.cwnd = INITIAL_CWND;
+    tcp.ssthresh = INITIAL_SSTHRESH;
+    tcp.rtt = 0;
+    tcp.total_packets = 0;
+    tcp.lost_packets = 0;
+    tcp.acknowledged = 0;
+
+    // Seed random number generator
+    srand(time(NULL));
+
+    // Open log file
+    logFile = fopen("cwnd_simulation.txt", "w");
+    if (logFile == NULL) {
+        printf("Error opening log file!\n");
+        return 1;
+    }
+    fprintf(logFile, "# RTT\tCWND\n");
+
+    printf("=== TCP Congestion Control Simulation ===\n");
+    printf("Initial CWND: %d, Threshold: %d\n\n", tcp.cwnd, tcp.ssthresh);
+    printf("%-5s %-10s %-10s %-10s %-10s\n", "RTT", "CWND", "Status", "Action", "Threshold");
+    printf("------------------------------------------------------------\n");
+
+    // Simulation Loop
+    for (i = 0; i < MAX_RTT; i++) {
+        tcp.rtt = i;
+        loss_event = simulate_packet_loss();
+
+        // Log current state
+        log_data(logFile, tcp.rtt, tcp.cwnd);
+
+        // Print to Console
+        char status[20] = "Normal";
+        char action[30] = "Congestion Avoidance";
+
+        if (tcp.cwnd < tcp.ssthresh) {
+            strcpy(action, "Slow Start (x2)");
+        }
+
+        if (loss_event) {
+            // Packet Loss Detected
+            tcp.lost_packets += tcp.cwnd;
+            tcp.ssthresh = tcp.cwnd / 2; // Reduce Threshold
+            if (tcp.ssthresh < 2) tcp.ssthresh = 2;
+            
+            tcp.cwnd = 1; // Reset CWND (Tahoe Style)
+            strcpy(status, "LOSS DETECTED");
+            strcpy(action, "Timeout -> CWND=1");
+        } else {
+            // No Loss - Increase Window
+            tcp.total_packets += tcp.cwnd;
+            tcp.acknowledged += tcp.cwnd;
+
+            if (tcp.cwnd < tcp.ssthresh) {
+                // Slow Start Phase
+                tcp.cwnd *= 2;
+            } else {
+                // Congestion Avoidance Phase
+                tcp.cwnd += 1;
+            }
+        }
+
+        // Cap CWND for display sanity
+        if (tcp.cwnd > 200) tcp.cwnd = 200; 
+
+        printf("%-5d %-10d %-10s %-10s %-10d\n", tcp.rtt, tcp.cwnd, status, action, tcp.ssthresh);
+        
+        // Small delay to see output clearly
+        // Sleep(100); // Uncomment if needed in Windows
+    }
+
+    fclose(logFile);
+
+    // Final Statistics
+    printf("\n=== Simulation Complete ===\n");
+    printf("Total RTTs: %d\n", tcp.rtt);
+    printf("Total Packets Sent: %d\n", tcp.total_packets);
+    printf("Total Packets Lost: %d\n", tcp.lost_packets);
+    printf("Packet Delivery Ratio: %.2f%%\n", 
+           (tcp.total_packets > 0) ? (float)(tcp.total_packets - tcp.lost_packets) / tcp.total_packets * 100 : 0);
+    printf("Final CWND: %d\n", tcp.cwnd);
+    printf("Data saved to 'cwnd_simulation.txt'\n");
+
+    return 0;
+}
