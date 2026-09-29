@@ -1,0 +1,378 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <winsock2.h>
+#include <windows.h>
+#include <time.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#define PORT 8080
+#define BUFFER_SIZE 1024
+#define MAX_LOCATIONS 50
+
+// Weather Data Structure
+typedef struct {
+    int seq_num;
+    int location_id;
+    float temperature;
+    float humidity;
+    float pressure;
+    float wind_speed;
+    time_t timestamp;
+} WeatherData;
+
+// Location Statistics
+typedef struct {
+    int location_id;
+    char location_name[50];
+    float avg_temp;
+    float avg_humidity;
+    float avg_pressure;
+    float avg_wind;
+    int data_count;
+    int last_seq;
+    time_t last_update;
+} LocationStats;
+
+LocationStats locations[MAX_LOCATIONS];
+int location_count = 0;
+CRITICAL_SECTION stats_lock;
+
+// Find or Create Location
+int find_location(int loc_id) {
+    for (int i = 0; i < location_count; i++) {
+        if (locations[i].location_id == loc_id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void add_location(int loc_id, char *name) {
+    if (location_count < MAX_LOCATIONS) {
+        locations[location_count].location_id = loc_id;
+        strcpy(locations[location_count].location_name, name);
+        locations[location_count].avg_temp = 0;
+        locations[location_count].avg_humidity = 0;
+        locations[location_count].avg_pressure = 0;
+        locations[location_count].avg_wind = 0;
+        locations[location_count].data_count = 0;
+        locations[location_count].last_seq = -1;
+        locations[location_count].last_update = time(NULL);
+        location_count++;
+    }
+}
+
+// Update Statistics (Running Average)
+void update_stats(int loc_idx, WeatherData *data) {
+    LocationStats *loc = &locations[loc_idx];
+    int n = loc->data_count + 1;
+    
+    loc->avg_temp = (loc->avg_temp * loc->data_count + data->temperature) / n;
+    loc->avg_humidity = (loc->avg_humidity * loc->data_count + data->humidity) / n;
+    loc->avg_pressure = (loc->avg_pressure * loc->data_count + data->pressure) / n;
+    loc->avg_wind = (loc->avg_wind * loc->data_count + data->wind_speed) / n;
+    loc->data_count = n;
+    loc->last_seq = data->seq_num;
+    loc->last_update = time(NULL);
+}
+
+int main() {
+    WSADATA wsaData;
+    SOCKET sockfd;
+    struct sockaddr_in servaddr, cliaddr;
+    char buffer[BUFFER_SIZE], response[BUFFER_SIZE];
+    int len = sizeof(cliaddr);
+
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        printf("Winsock Init Failed\n"); return 1;
+    }
+
+    InitializeCriticalSection(&stats_lock);
+
+    // Initialize Sample Locations
+    add_location(1, "Chennai");
+    add_location(2, "Mumbai");
+    add_location(3, "Delhi");
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd == INVALID_SOCKET) {
+        printf("Socket Creation Failed\n"); return 1;
+    }
+
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    servaddr.sin_port = htons(PORT);
+
+    if (bind(sockfd, (const struct sockaddr*)&servaddr, sizeof(servaddr)) == SOCKET_ERROR) {
+        printf("Bind Failed\n"); return 1;
+    }
+
+    printf("=== Weather Monitoring Server ===\n");
+    printf("Listening on Port %d...\n\n", PORT);
+
+    while (1) {
+        memset(buffer, 0, BUFFER_SIZE);
+        int n = recvfrom(sockfd, (char*)buffer, BUFFER_SIZE, 0, (struct sockaddr*)&cliaddr, &len);
+        if (n <= 0) continue;
+
+        buffer[n] = '\0';
+
+        // Parse Command: CMD|DATA
+        char cmd[20], data[BUFFER_SIZE];
+        sscanf(buffer, "%[^|]|%s", cmd, data);
+
+        EnterCriticalSection(&stats_lock);
+
+        // 1. WEATHER DATA (SEQ|LOC_ID|TEMP|HUMID|PRESS|WIND)
+        if (strcmp(cmd, "WEATHER") == 0) {
+            WeatherData wd;
+            sscanf(data, "%d|%d|%f|%f|%f|%f", 
+                   &wd.seq_num, &wd.location_id, &wd.temperature, 
+                   &wd.humidity, &wd.pressure, &wd.wind_speed);
+            wd.timestamp = time(NULL);
+
+            int loc_idx = find_location(wd.location_id);
+            if (loc_idx >= 0) {
+                // Check Duplicate
+                if (wd.seq_num <= locations[loc_idx].last_seq) {
+                    sprintf(response, "ACK|DUPLICATE|%d", wd.seq_num);
+                    printf("Duplicate packet from Location %d (Seq: %d)\n", 
+                           wd.location_id, wd.seq_num);
+                } else {
+                    // Check Missing (Gap in sequence)
+                    if (wd.seq_num > locations[loc_idx].last_seq + 1) {
+                        printf("Packet loss detected! Expected: %d, Received: %d\n", 
+                               locations[loc_idx].last_seq + 1, wd.seq_num);
+                    }
+                    update_stats(loc_idx, &wd);
+                    sprintf(response, "ACK|OK|%d", wd.seq_num);
+                    printf("Weather data received from %s (Temp: %.2fC)\n", 
+                           locations[loc_idx].location_name, wd.temperature);
+                }
+            } else {
+                sprintf(response, "ACK|ERROR|Invalid Location");
+            }
+            sendto(sockfd, response, strlen(response), 0, (struct sockaddr*)&cliaddr, len);
+        }
+        // 2. QUERY STATISTICS
+        else if (strcmp(cmd, "QUERY") == 0) {
+            int loc_id = atoi(data);
+            int loc_idx = find_location(loc_id);
+            if (loc_idx >= 0) {
+                sprintf(response, "STATS|%s|Temp:%.2fC|Humid:%.2f%%|Press:%.2fhPa|Wind:%.2fkm/h|Samples:%d", 
+                        locations[loc_idx].location_name,
+                        locations[loc_idx].avg_temp,
+                        locations[loc_idx].avg_humidity,
+                        locations[loc_idx].avg_pressure,
+                        locations[loc_idx].avg_wind,
+                        locations[loc_idx].data_count);
+            } else {
+                sprintf(response, "STATS|ERROR|Location not found");
+            }
+            sendto(sockfd, response, strlen(response), 0, (struct sockaddr*)&cliaddr, len);
+        }
+        // 3. QUERY ALL LOCATIONS
+        else if (strcmp(cmd, "QUERY_ALL") == 0) {
+            char temp[800] = "ALL_STATS|";
+            for (int i = 0; i < location_count; i++) {
+                char entry[200];
+                sprintf(entry, "[%s: T=%.1fC, H=%.1f%%] ", 
+                        locations[i].location_name, 
+                        locations[i].avg_temp, 
+                        locations[i].avg_humidity);
+                strcat(temp, entry);
+            }
+            sendto(sockfd, temp, strlen(temp), 0, (struct sockaddr*)&cliaddr, len);
+        }
+
+        LeaveCriticalSection(&stats_lock);
+    }
+
+    closesocket(sockfd);
+    DeleteCriticalSection(&stats_lock);
+    WSACleanup();
+    return 0;
+}
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <winsock2.h>
+#include <windows.h>
+#include <time.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#define PORT 8080
+#define BUFFER_SIZE 1024
+#define TIMEOUT_SEC 3
+#define MAX_RETRIES 3
+
+SOCKET sockfd;
+struct sockaddr_in servaddr;
+int seq_num = 0;
+int location_id;
+char location_name[50];
+
+// Send with Timeout and Retransmission
+int send_with_retry(char *data, int data_len) {
+    int attempts = 0;
+    while (attempts < MAX_RETRIES) {
+        sendto(sockfd, data, data_len, 0, (struct sockaddr*)&servaddr, sizeof(servaddr));
+        
+        // Set Timeout
+        struct timeval tv;
+        tv.tv_sec = TIMEOUT_SEC;
+        tv.tv_usec = 0;
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
+        char response[BUFFER_SIZE];
+        int n = recvfrom(sockfd, response, BUFFER_SIZE, 0, NULL, NULL);
+        if (n > 0) {
+            response[n] = '\0';
+            printf("Server ACK: %s\n", response);
+            
+            // Check if ACK is for this sequence
+            if (strstr(response, "OK") || strstr(response, "DUPLICATE")) {
+                return 1; // Success
+            }
+        } else {
+            printf("Timeout! Retransmitting (Attempt %d/%d)...\n", attempts + 1, MAX_RETRIES);
+        }
+        attempts++;
+    }
+    printf("Failed to receive ACK after %d attempts.\n", MAX_RETRIES);
+    return 0; // Failed
+}
+
+void send_weather_data(float temp, float humid, float press, float wind) {
+    char buffer[BUFFER_SIZE];
+    seq_num++;
+    sprintf(buffer, "WEATHER|%d|%d|%.2f|%.2f|%.2f|%.2f", 
+            seq_num, location_id, temp, humid, press, wind);
+    
+    printf("Sending: %s\n", buffer);
+    send_with_retry(buffer, strlen(buffer));
+}
+
+void query_stats() {
+    char buffer[BUFFER_SIZE];
+    sprintf(buffer, "QUERY|%d", location_id);
+    
+    struct timeval tv;
+    tv.tv_sec = TIMEOUT_SEC;
+    tv.tv_usec = 0;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
+    sendto(sockfd, buffer, strlen(buffer), 0, (struct sockaddr*)&servaddr, sizeof(servaddr));
+    
+    char response[BUFFER_SIZE];
+    int n = recvfrom(sockfd, response, BUFFER_SIZE, 0, NULL, NULL);
+    if (n > 0) {
+        response[n] = '\0';
+        printf("Server Response: %s\n", response);
+    } else {
+        printf("Query timeout!\n");
+    }
+}
+
+void query_all() {
+    char buffer[BUFFER_SIZE] = "QUERY_ALL|";
+    
+    struct timeval tv;
+    tv.tv_sec = TIMEOUT_SEC;
+    tv.tv_usec = 0;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
+    sendto(sockfd, buffer, strlen(buffer), 0, (struct sockaddr*)&servaddr, sizeof(servaddr));
+    
+    char response[BUFFER_SIZE];
+    int n = recvfrom(sockfd, response, BUFFER_SIZE, 0, NULL, NULL);
+    if (n > 0) {
+        response[n] = '\0';
+        printf("Server Response: %s\n", response);
+    } else {
+        printf("Query timeout!\n");
+    }
+}
+
+int main() {
+    WSADATA wsaData;
+    char buffer[BUFFER_SIZE];
+    int choice;
+
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        printf("Winsock Init Failed\n"); return 1;
+    }
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd == INVALID_SOCKET) {
+        printf("Socket Creation Failed\n"); return 1;
+    }
+
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_port = htons(PORT);
+    servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    printf("=== Weather Station Client ===\n");
+    printf("Enter Location ID (1=Chennai, 2=Mumbai, 3=Delhi): ");
+    scanf("%d", &location_id);
+    getchar();
+
+    if (location_id == 1) strcpy(location_name, "Chennai");
+    else if (location_id == 2) strcpy(location_name, "Mumbai");
+    else if (location_id == 3) strcpy(location_name, "Delhi");
+    else strcpy(location_name, "Unknown");
+
+    printf("Location: %s (ID: %d)\n\n", location_name, location_id);
+
+    while (1) {
+        printf("\n1. Send Weather Data\n");
+        printf("2. Query My Location Stats\n");
+        printf("3. Query All Locations\n");
+        printf("4. Auto-Send (5 iterations)\n");
+        printf("5. Exit\n");
+        printf("Choice: ");
+        scanf("%d", &choice);
+        getchar();
+
+        if (choice == 1) {
+            float temp, humid, press, wind;
+            printf("Temperature (C): "); scanf("%f", &temp);
+            printf("Humidity (%%): "); scanf("%f", &humid);
+            printf("Pressure (hPa): "); scanf("%f", &press);
+            printf("Wind Speed (km/h): "); scanf("%f", &wind);
+            getchar();
+            send_weather_data(temp, humid, press, wind);
+        }
+        else if (choice == 2) {
+            query_stats();
+        }
+        else if (choice == 3) {
+            query_all();
+        }
+        else if (choice == 4) {
+            printf("Auto-sending 5 weather updates...\n");
+            srand(time(NULL));
+            for (int i = 0; i < 5; i++) {
+                float temp = 25.0 + (rand() % 100) / 10.0;
+                float humid = 50.0 + (rand() % 500) / 10.0;
+                float press = 1000.0 + (rand() % 500) / 10.0;
+                float wind = 5.0 + (rand() % 200) / 10.0;
+                send_weather_data(temp, humid, press, wind);
+                Sleep(1000); // 1 second interval
+            }
+        }
+        else if (choice == 5) {
+            break;
+        }
+    }
+
+    closesocket(sockfd);
+    WSACleanup();
+    return 0;
+}
