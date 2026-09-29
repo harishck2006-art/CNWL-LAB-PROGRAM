@@ -1,0 +1,160 @@
+[24bcs170@mepcolinux P2]$cat server.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+
+#define PORT 12345
+#define BUFFER_SIZE 1024
+
+int main() {
+    int sockfd;
+    char buffer[BUFFER_SIZE];
+    struct sockaddr_in servaddr, cliaddr;
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        perror("Socket creation failed");
+        exit(1);
+    }
+
+    memset(&servaddr, 0, sizeof(servaddr));
+    memset(&cliaddr, 0, sizeof(cliaddr));
+
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = INADDR_ANY;
+    servaddr.sin_port = htons(PORT);
+
+    if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
+        perror("Bind failed");
+        exit(1);
+    }
+
+    printf("UDP Server running on port %d\n", PORT);
+    printf("Waiting for client...\n\n");
+
+    socklen_t len = sizeof(cliaddr);
+
+    while (1) {
+        double num1, num2, result;
+        char operation;
+        char response[BUFFER_SIZE];
+
+        int n = recvfrom(sockfd, buffer, BUFFER_SIZE, 0,
+                         (struct sockaddr *)&cliaddr, &len);
+        buffer[n] = '\0';
+        printf("Received: %s\n", buffer);
+
+        sscanf(buffer, "%lf %c %lf", &num1, &operation, &num2);
+
+        int valid = 1;
+
+        switch (operation) {
+            case '+':
+                result = num1 + num2;
+                break;
+            case '-':
+                result = num1 - num2;
+                break;
+            case '*':
+                result = num1 * num2;
+                break;
+            case '/':
+                if (num2 == 0) {
+                    strcpy(response, "Error: Division by zero not allowed!");
+                    valid = 0;
+                } else {
+                    result = num1 / num2;
+                }
+                break;
+            default:
+                strcpy(response, "Error: Invalid operation!");
+                valid = 0;
+        }
+
+        if (valid) {
+            sprintf(response, "Result: %.2lf", result);
+        }
+
+        sendto(sockfd, response, strlen(response), 0,
+               (const struct sockaddr *)&cliaddr, len);
+        printf("Sent: %s\n\n", response);
+    }
+
+    close(sockfd);
+    return 0;
+}
+[24bcs170@mepcolinux P2]$cat client.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+
+#define PORT 12345
+#define BUFFER_SIZE 1024
+
+int main() {
+    int sockfd;
+    char buffer[BUFFER_SIZE];
+    char message[BUFFER_SIZE];
+    struct sockaddr_in servaddr;
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        perror("Socket creation failed");
+        exit(1);
+    }
+
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_port = htons(PORT);
+    servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    printf("========================================\n");
+    printf("        UDP Calculator Client\n");
+    printf("========================================\n");
+
+    socklen_t len = sizeof(servaddr);
+
+    while (1) {
+        double num1, num2;
+        char operation;
+        char choice[10];
+
+        printf("\nPerform operation? (yes/exit): ");
+        scanf("%s", choice);
+
+        if (strcmp(choice, "exit") == 0) {
+            printf("Exiting calculator. Bye!\n");
+            break;
+        }
+
+        if (strcmp(choice, "yes") != 0) {
+            printf("Invalid choice! Type 'yes' or 'exit'.\n");
+            continue;
+        }
+
+        printf("Enter first number: ");
+        scanf("%lf", &num1);
+        printf("Enter operation (+, -, *, /): ");
+        scanf(" %c", &operation);
+        printf("Enter second number: ");
+        scanf("%lf", &num2);
+
+        sprintf(message, "%lf %c %lf", num1, operation, num2);
+
+        sendto(sockfd, message, strlen(message), 0,
+               (const struct sockaddr *)&servaddr, len);
+
+        int n = recvfrom(sockfd, buffer, BUFFER_SIZE, 0,
+                        (struct sockaddr *)&servaddr, &len);
+        buffer[n] = '\0';
+
+        printf("\n>>> %s\n", buffer);
+    }
+
+    close(sockfd);
+    return 0;
+}
