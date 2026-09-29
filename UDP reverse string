@@ -1,0 +1,142 @@
+[24bcs170@mepcolinux EX5]$cat server1.c
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+int main()
+{
+    int sockfd, n, i;
+    char buffer[1024], temp;
+    struct sockaddr_in serverAddr, clientAddr;
+    socklen_t addrLen = sizeof(clientAddr);
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0)
+    {
+        printf("Socket creation failed\n");
+        return 1;
+    }
+
+    memset(&serverAddr, 0, sizeof(serverAddr));
+    memset(&clientAddr, 0, sizeof(clientAddr));
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(5170);
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
+    {
+        printf("Bind failed\n");
+        close(sockfd);
+        return 1;
+    }
+
+    printf("UDP Reverse Server is running on Port 5170...\n");
+
+    while (1)
+    {
+        n = recvfrom(sockfd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&clientAddr, &addrLen);
+        if (n < 0)
+        {
+            printf("Receive failed\n");
+            break;
+        }
+        buffer[n] = '\0';
+        printf("Client sent: %s\n", buffer);
+
+        for (i = 0; i < n / 2; i++)
+        {
+            temp = buffer[i];
+            buffer[i] = buffer[n - i - 1];
+            buffer[n - i - 1] = temp;
+        }
+
+        sendto(sockfd, buffer, n, 0, (struct sockaddr *)&clientAddr, addrLen);
+        printf("Reversed string sent\n");
+    }
+
+    close(sockfd);
+    return 0;
+}
+
+[24bcs170@mepcolinux EX5]$cat client1.c
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+int main()
+{
+    int sockfd, choice, n;
+    char message[1024], buffer[1024];
+    struct sockaddr_in serverAddr;
+    socklen_t addrLen = sizeof(serverAddr);
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0)
+    {
+        printf("Socket creation failed\n");
+        return 1;
+    }
+
+    memset(&serverAddr, 0, sizeof(serverAddr));
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(5170);
+    serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    while (1)
+    {
+        printf("\n1. Send String\n");
+        printf("2. Exit\n");
+        printf("Enter choice: ");
+        scanf("%d", &choice);
+        getchar();
+
+        if (choice == 2)
+            break;
+
+        if (choice == 1)
+        {
+            printf("Enter string: ");
+            fgets(message, sizeof(message), stdin);
+            message[strcspn(message, "\n")] = '\0';
+
+            sendto(sockfd, message, strlen(message), 0, (struct sockaddr *)&serverAddr, sizeof(serverAddr));
+
+            n = recvfrom(sockfd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr *)&serverAddr, &addrLen);
+            if (n < 0)
+            {
+                printf("Receive failed\n");
+                break;
+            }
+            buffer[n] = '\0';
+            printf("Reversed String: %s\n", buffer);
+        }
+        else
+        {
+            printf("Invalid choice\n");
+        }
+    }
+
+    close(sockfd);
+    return 0;
+}[24bcs170@mepcolinux EX5]$gcc server1.c -o server1
+[24bcs170@mepcolinux EX5]$./server1
+UDP Reverse Server is running on Port 5170...
+Client sent: harish perumal
+Reversed string sent
+
+[24bcs170@mepcolinux EX5]$gcc client1.c -o client1
+[24bcs170@mepcolinux EX5]$./client1
+
+1. Send String
+2. Exit
+Enter choice: 1
+Enter string: harish perumal
+Reversed String: lamurep hsirah
+
+1. Send String
+2. Exit
+Enter choice: 2
