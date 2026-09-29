@@ -1,0 +1,373 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <winsock2.h>
+#include <windows.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#define PORT 8080
+#define BUFFER_SIZE 1024
+#define MAX_BOOKS 100
+
+// Book Structure
+typedef struct {
+    int id;
+    char title[100];
+    char author[100];
+    char category[50];
+    int available; // 1 = Available, 0 = Issued
+    int issued_to; // Student ID (0 if available)
+} Book;
+
+// Library Database
+Book library[MAX_BOOKS];
+int book_count = 0;
+
+// Initialize Library with Sample Data
+void init_library() {
+    library[0] = (Book){101, "C Programming", "Dennis Ritchie", "Technical", 1, 0};
+    library[1] = (Book){102, "Data Structures", "Seymour Lipschutz", "Technical", 1, 0};
+    library[2] = (Book){103, "Operating Systems", "Galvin", "Technical", 1, 0};
+    library[3] = (Book){104, "Harry Potter", "J.K. Rowling", "Fiction", 1, 0};
+    library[4] = (Book){105, "Sherlock Holmes", "Arthur Conan", "Fiction", 1, 0};
+    book_count = 5;
+}
+
+// Save Library to File
+void save_library() {
+    FILE *f = fopen("library_data.txt", "w");
+    for (int i = 0; i < book_count; i++) {
+        fprintf(f, "%d|%s|%s|%s|%d|%d\n", 
+                library[i].id, library[i].title, library[i].author, 
+                library[i].category, library[i].available, library[i].issued_to);
+    }
+    fclose(f);
+}
+
+// Load Library from File
+void load_library() {
+    FILE *f = fopen("library_data.txt", "r");
+    if (f == NULL) {
+        init_library();
+        save_library();
+        return;
+    }
+    while (fscanf(f, "%d|%[^|]|%[^|]|%[^|]|%d|%d\n", 
+                  &library[book_count].id, library[book_count].title,
+                  library[book_count].author, library[book_count].category,
+                  &library[book_count].available, &library[book_count].issued_to) != EOF) {
+        book_count++;
+    }
+    fclose(f);
+}
+
+// Search Book by Title or Author
+int search_book(char *keyword, int *results) {
+    int count = 0;
+    for (int i = 0; i < book_count; i++) {
+        if (strstr(library[i].title, keyword) != NULL || 
+            strstr(library[i].author, keyword) != NULL) {
+            results[count++] = i;
+        }
+    }
+    return count;
+}
+
+int main() {
+    WSADATA wsaData;
+    SOCKET serverSocket, clientSocket;
+    struct sockaddr_in servaddr, cliaddr;
+    int len = sizeof(cliaddr);
+    char buffer[BUFFER_SIZE], response[BUFFER_SIZE];
+
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        printf("Winsock Init Failed\n"); return 1;
+    }
+
+    load_library();
+    printf("Library Data Loaded (%d books)\n", book_count);
+
+    serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSocket == INVALID_SOCKET) {
+        printf("Socket Creation Failed\n"); return 1;
+    }
+
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    servaddr.sin_port = htons(PORT);
+
+    if (bind(serverSocket, (const struct sockaddr*)&servaddr, sizeof(servaddr)) == SOCKET_ERROR) {
+        printf("Bind Failed\n"); return 1;
+    }
+
+    listen(serverSocket, 1); // Iterative: Only 1 client at a time
+    printf("\n=== Library Server (Iterative) ===\n");
+    printf("Listening on Port %d...\n", PORT);
+    printf("Processing ONE client at a time.\n\n");
+
+    while (1) {
+        printf("Waiting for client connection...\n");
+        clientSocket = accept(serverSocket, (struct sockaddr*)&cliaddr, &len);
+        if (clientSocket == INVALID_SOCKET) {
+            printf("Accept Failed\n"); continue;
+        }
+        printf("Client connected. Processing request...\n");
+
+        // Handle Client (Iterative - One at a time)
+        while (1) {
+            memset(buffer, 0, BUFFER_SIZE);
+            int n = recv(clientSocket, buffer, BUFFER_SIZE, 0);
+            if (n <= 0) {
+                printf("Client disconnected.\n");
+                break;
+            }
+
+            // Parse Command: CMD|DATA
+            char cmd[20], data[200];
+            sscanf(buffer, "%[^|]|%s", cmd, data);
+
+            memset(response, 0, BUFFER_SIZE);
+
+            // 1. VIEW ALL BOOKS
+            if (strcmp(cmd, "VIEW_ALL") == 0) {
+                sprintf(response, "%-6s %-25s %-20s %-15s %-10s\n", 
+                        "ID", "TITLE", "AUTHOR", "CATEGORY", "STATUS");
+                for (int i = 0; i < book_count; i++) {
+                    char status[10] = library[i].available ? "Available" : "Issued";
+                    char temp[300];
+                    sprintf(temp, "%-6d %-25s %-20s %-15s %-10s\n", 
+                            library[i].id, library[i].title, library[i].author, 
+                            library[i].category, status);
+                    strcat(response, temp);
+                }
+            }
+            // 2. SEARCH BOOK
+            else if (strcmp(cmd, "SEARCH") == 0) {
+                int results[MAX_BOOKS];
+                int count = search_book(data, results);
+                if (count > 0) {
+                    sprintf(response, "Found %d book(s):\n", count);
+                    for (int i = 0; i < count; i++) {
+                        int idx = results[i];
+                        char temp[300];
+                        sprintf(temp, "ID:%d | %s by %s | %s\n", 
+                                library[idx].id, library[idx].title, 
+                                library[idx].author, library[idx].category);
+                        strcat(response, temp);
+                    }
+                } else {
+                    sprintf(response, "No books found for '%s'", data);
+                }
+            }
+            // 3. CHECK AVAILABILITY
+            else if (strcmp(cmd, "CHECK") == 0) {
+                int book_id = atoi(data);
+                int found = 0;
+                for (int i = 0; i < book_count; i++) {
+                    if (library[i].id == book_id) {
+                        found = 1;
+                        if (library[i].available) {
+                            sprintf(response, "Book ID %d is AVAILABLE", book_id);
+                        } else {
+                            sprintf(response, "Book ID %d is ISSUED to Student %d", 
+                                    book_id, library[i].issued_to);
+                        }
+                        break;
+                    }
+                }
+                if (!found) sprintf(response, "Book ID %d not found", book_id);
+            }
+            // 4. ISSUE BOOK
+            else if (strcmp(cmd, "ISSUE") == 0) {
+                // Format: ISSUE|BookID|StudentID
+                int book_id, student_id;
+                sscanf(data, "%d|%d", &book_id, &student_id);
+                int found = 0;
+                for (int i = 0; i < book_count; i++) {
+                    if (library[i].id == book_id) {
+                        found = 1;
+                        if (library[i].available) {
+                            library[i].available = 0;
+                            library[i].issued_to = student_id;
+                            sprintf(response, "Book ID %d ISSUED to Student %d", book_id, student_id);
+                            save_library();
+                        } else {
+                            sprintf(response, "Book ID %d already ISSUED", book_id);
+                        }
+                        break;
+                    }
+                }
+                if (!found) sprintf(response, "Book ID %d not found", book_id);
+            }
+            // 5. RETURN BOOK
+            else if (strcmp(cmd, "RETURN") == 0) {
+                int book_id = atoi(data);
+                int found = 0;
+                for (int i = 0; i < book_count; i++) {
+                    if (library[i].id == book_id) {
+                        found = 1;
+                        if (!library[i].available) {
+                            library[i].available = 1;
+                            library[i].issued_to = 0;
+                            sprintf(response, "Book ID %d RETURNED successfully", book_id);
+                            save_library();
+                        } else {
+                            sprintf(response, "Book ID %d was not ISSUED", book_id);
+                        }
+                        break;
+                    }
+                }
+                if (!found) sprintf(response, "Book ID %d not found", book_id);
+            }
+            // 6. VIEW ISSUED BOOKS
+            else if (strcmp(cmd, "VIEW_ISSUED") == 0) {
+                int student_id = atoi(data);
+                int found = 0;
+                sprintf(response, "Books issued to Student %d:\n", student_id);
+                for (int i = 0; i < book_count; i++) {
+                    if (library[i].issued_to == student_id) {
+                        found = 1;
+                        char temp[300];
+                        sprintf(temp, "ID:%d | %s by %s\n", 
+                                library[i].id, library[i].title, library[i].author);
+                        strcat(response, temp);
+                    }
+                }
+                if (!found) strcat(response, "No books issued");
+            }
+            // 7. EXIT
+            else if (strcmp(cmd, "EXIT") == 0) {
+                sprintf(response, "Goodbye!");
+                send(clientSocket, response, strlen(response), 0);
+                break;
+            }
+            else {
+                sprintf(response, "Invalid Command");
+            }
+
+            send(clientSocket, response, strlen(response), 0);
+        }
+
+        closesocket(clientSocket);
+        printf("Connection closed. Waiting for next client...\n\n");
+    }
+
+    closesocket(serverSocket);
+    WSACleanup();
+    return 0;
+}#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <winsock2.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#define PORT 8080
+#define BUFFER_SIZE 2048
+
+int main() {
+    WSADATA wsaData;
+    SOCKET sockfd;
+    struct sockaddr_in servaddr;
+    char buffer[BUFFER_SIZE], input[BUFFER_SIZE];
+    int choice;
+
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        printf("Winsock Init Failed\n"); return 1;
+    }
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == INVALID_SOCKET) {
+        printf("Socket Creation Failed\n"); return 1;
+    }
+
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_port = htons(PORT);
+    servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    if (connect(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
+        printf("Connection Failed. Is Server Running?\n"); return 1;
+    }
+
+    printf("=== College Library Client ===\n");
+    printf("Connected to Library Server.\n\n");
+
+    while (1) {
+        printf("\n1. View All Books\n");
+        printf("2. Search Book (Title/Author)\n");
+        printf("3. Check Availability\n");
+        printf("4. Issue Book\n");
+        printf("5. Return Book\n");
+        printf("6. View Issued Books (by Student ID)\n");
+        printf("7. Exit\n");
+        printf("Choice: ");
+        scanf("%d", &choice);
+        getchar(); // Clear newline
+
+        memset(input, 0, BUFFER_SIZE);
+        memset(buffer, 0, BUFFER_SIZE);
+
+        if (choice == 1) {
+            strcpy(input, "VIEW_ALL|");
+        }
+        else if (choice == 2) {
+            char keyword[100];
+            printf("Enter keyword: ");
+            fgets(keyword, 100, stdin);
+            keyword[strcspn(keyword, "\n")] = 0;
+            sprintf(input, "SEARCH|%s", keyword);
+        }
+        else if (choice == 3) {
+            int book_id;
+            printf("Enter Book ID: ");
+            scanf("%d", &book_id);
+            getchar();
+            sprintf(input, "CHECK|%d", book_id);
+        }
+        else if (choice == 4) {
+            int book_id, student_id;
+            printf("Enter Book ID: ");
+            scanf("%d", &book_id);
+            printf("Enter Student ID: ");
+            scanf("%d", &student_id);
+            getchar();
+            sprintf(input, "ISSUE|%d|%d", book_id, student_id);
+        }
+        else if (choice == 5) {
+            int book_id;
+            printf("Enter Book ID: ");
+            scanf("%d", &book_id);
+            getchar();
+            sprintf(input, "RETURN|%d", book_id);
+        }
+        else if (choice == 6) {
+            int student_id;
+            printf("Enter Student ID: ");
+            scanf("%d", &student_id);
+            getchar();
+            sprintf(input, "VIEW_ISSUED|%d", student_id);
+        }
+        else if (choice == 7) {
+            strcpy(input, "EXIT|");
+            send(sockfd, input, strlen(input), 0);
+            recv(sockfd, buffer, BUFFER_SIZE, 0);
+            printf("Server: %s\n", buffer);
+            break;
+        }
+        else {
+            printf("Invalid Choice!\n");
+            continue;
+        }
+
+        send(sockfd, input, strlen(input), 0);
+        recv(sockfd, buffer, BUFFER_SIZE, 0);
+        printf("\nServer Response:\n%s\n", buffer);
+    }
+
+    closesocket(sockfd);
+    WSACleanup();
+    return 0;
+}
