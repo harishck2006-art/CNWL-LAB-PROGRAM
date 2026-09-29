@@ -1,0 +1,1040 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <time.h>
+
+#define PORT 8080
+#define MAX_TRAINS 8
+#define MAX_BOOKINGS 200
+#define BUFFER_SIZE 4096
+#define LOG_FILE "railway_log.txt"
+#define DB_FILE "railway_bookings.dat"
+
+/* ================== DATA STRUCTURES ================== */
+
+typedef struct {
+    int classId;
+    char className[20];
+    int totalSeats;
+    int availableSeats;
+    float fare;
+} TrainClass;
+
+typedef struct {
+    int trainId;
+    char trainName[60];
+    char source[40];
+    char destination[40];
+    char departure[15];
+    char arrival[15];
+    char runDays[30];
+    TrainClass classes[3];
+    int classCount;
+} Train;
+
+typedef struct {
+    int pnr;
+    int trainId;
+    int classId;
+    char passengerName[100];
+    int age;
+    char gender[10];
+    int numTickets;
+    float totalFare;
+    char journeyDate[20];
+    char status[20];
+    char bookingTime[30];
+} Booking;
+
+/* ================== GLOBAL VARIABLES ================== */
+
+Train trains[MAX_TRAINS];
+int trainCount = 0;
+
+Booking bookings[MAX_BOOKINGS];
+int bookingCount = 0;
+int nextPNR = 100001;
+
+/* ================== UTILITY: GET TIMESTAMP ================== */
+
+void getTimestamp(char *buf, int size) {
+    time_t now;
+    struct tm *t;
+    now = time(NULL);
+    t = localtime(&now);
+    strftime(buf, size, "%Y-%m-%d %H:%M:%S", t);
+}
+
+/* ================== LOGGING ================== */
+
+void writeLog(const char *clientIP, int clientPort, const char *msg) {
+    FILE *fp;
+    char ts[64];
+    getTimestamp(ts, sizeof(ts));
+
+    fp = fopen(LOG_FILE, "a");
+    if (fp != NULL) {
+        if (clientIP != NULL) {
+            fprintf(fp, "[%s] [%s:%d] %s\n", ts, clientIP, clientPort, msg);
+        } else {
+            fprintf(fp, "[%s] [SERVER] %s\n", ts, msg);
+        }
+        fclose(fp);
+    }
+
+    if (clientIP != NULL) {
+        printf("[%s] [%s:%d] %s\n", ts, clientIP, clientPort, msg);
+    } else {
+        printf("[%s] [SERVER] %s\n", ts, msg);
+    }
+}
+
+/* ================== SAVE DATABASE TO FILE ================== */
+
+void saveDatabase() {
+    FILE *fp;
+    int i;
+
+    fp = fopen(DB_FILE, "w");
+    if (fp == NULL) return;
+
+    fprintf(fp, "================================================================"
+                "================================================================\n");
+    fprintf(fp, "                    RAILWAY RESERVATION DATABASE\n");
+    fprintf(fp, "================================================================"
+                "================================================================\n");
+    fprintf(fp, "%-10s %-8s %-5s %-15s %-5s %-8s %-4s %-10s %-12s %-12s %-20s\n",
+            "PNR", "TrainID", "Cls", "Passenger", "Age", "Gender",
+            "Qty", "Fare", "Journey", "Status", "BookedAt");
+    fprintf(fp, "----------------------------------------------------------------"
+                "----------------------------------------------------------------\n");
+
+    for (i = 0; i < bookingCount; i++) {
+        fprintf(fp, "%-10d %-8d %-5d %-15s %-5d %-8s %-4d %-10.0f %-12s %-12s %-20s\n",
+                bookings[i].pnr,
+                bookings[i].trainId,
+                bookings[i].classId,
+                bookings[i].passengerName,
+                bookings[i].age,
+                bookings[i].gender,
+                bookings[i].numTickets,
+                bookings[i].totalFare,
+                bookings[i].journeyDate,
+                bookings[i].status,
+                bookings[i].bookingTime);
+    }
+
+    fprintf(fp, "================================================================"
+                "================================================================\n");
+    fprintf(fp, "Total Bookings: %d\n", bookingCount);
+    fclose(fp);
+}
+
+/* ================== INITIALIZE TRAINS ================== */
+
+void initializeTrains() {
+    TrainClass c1, c2, c3;
+
+    /* Train 1 */
+    trains[0].trainId = 12001;
+    strcpy(trains[0].trainName, "Chennai Express");
+    strcpy(trains[0].source, "Chennai");
+    strcpy(trains[0].destination, "Mumbai");
+    strcpy(trains[0].departure, "06:00 AM");
+    strcpy(trains[0].arrival, "10:00 PM");
+    strcpy(trains[0].runDays, "Mon-Wed-Fri-Sun");
+    trains[0].classCount = 3;
+    c1.classId = 1; strcpy(c1.className, "Sleeper");
+    c1.totalSeats = 100; c1.availableSeats = 100; c1.fare = 450.0;
+    c2.classId = 2; strcpy(c2.className, "AC-3Tier");
+    c2.totalSeats = 60; c2.availableSeats = 60; c2.fare = 1200.0;
+    c3.classId = 3; strcpy(c3.className, "AC-2Tier");
+    c3.totalSeats = 40; c3.availableSeats = 40; c3.fare = 1800.0;
+    trains[0].classes[0] = c1;
+    trains[0].classes[1] = c2;
+    trains[0].classes[2] = c3;
+
+    /* Train 2 */
+    trains[1].trainId = 12002;
+    strcpy(trains[1].trainName, "Kovai Express");
+    strcpy(trains[1].source, "Chennai");
+    strcpy(trains[1].destination, "Coimbatore");
+    strcpy(trains[1].departure, "07:30 AM");
+    strcpy(trains[1].arrival, "02:30 PM");
+    strcpy(trains[1].runDays, "Daily");
+    trains[1].classCount = 3;
+    c1.classId = 1; strcpy(c1.className, "Sleeper");
+    c1.totalSeats = 80; c1.availableSeats = 80; c1.fare = 250.0;
+    c2.classId = 2; strcpy(c2.className, "AC-3Tier");
+    c2.totalSeats = 50; c2.availableSeats = 50; c2.fare = 700.0;
+    c3.classId = 3; strcpy(c3.className, "AC-2Tier");
+    c3.totalSeats = 30; c3.availableSeats = 30; c3.fare = 1100.0;
+    trains[1].classes[0] = c1;
+    trains[1].classes[1] = c2;
+    trains[1].classes[2] = c3;
+
+    /* Train 3 */
+    trains[2].trainId = 12003;
+    strcpy(trains[2].trainName, "Pandian Express");
+    strcpy(trains[2].source, "Chennai");
+    strcpy(trains[2].destination, "Madurai");
+    strcpy(trains[2].departure, "09:00 PM");
+    strcpy(trains[2].arrival, "06:00 AM");
+    strcpy(trains[2].runDays, "Daily");
+    trains[2].classCount = 3;
+    c1.classId = 1; strcpy(c1.className, "Sleeper");
+    c1.totalSeats = 90; c1.availableSeats = 90; c1.fare = 300.0;
+    c2.classId = 2; strcpy(c2.className, "AC-3Tier");
+    c2.totalSeats = 55; c2.availableSeats = 55; c2.fare = 850.0;
+    c3.classId = 3; strcpy(c3.className, "AC-2Tier");
+    c3.totalSeats = 35; c3.availableSeats = 35; c3.fare = 1300.0;
+    trains[2].classes[0] = c1;
+    trains[2].classes[1] = c2;
+    trains[2].classes[2] = c3;
+
+    /* Train 4 */
+    trains[3].trainId = 12004;
+    strcpy(trains[3].trainName, "Rockfort Express");
+    strcpy(trains[3].source, "Chennai");
+    strcpy(trains[3].destination, "Trichy");
+    strcpy(trains[3].departure, "10:00 PM");
+    strcpy(trains[3].arrival, "05:30 AM");
+    strcpy(trains[3].runDays, "Daily");
+    trains[3].classCount = 3;
+    c1.classId = 1; strcpy(c1.className, "Sleeper");
+    c1.totalSeats = 85; c1.availableSeats = 85; c1.fare = 280.0;
+    c2.classId = 2; strcpy(c2.className, "AC-3Tier");
+    c2.totalSeats = 50; c2.availableSeats = 50; c2.fare = 780.0;
+    c3.classId = 3; strcpy(c3.className, "AC-2Tier");
+    c3.totalSeats = 30; c3.availableSeats = 30; c3.fare = 1200.0;
+    trains[3].classes[0] = c1;
+    trains[3].classes[1] = c2;
+    trains[3].classes[2] = c3;
+
+    /* Train 5 */
+    trains[4].trainId = 12005;
+    strcpy(trains[4].trainName, "Vaigai Express");
+    strcpy(trains[4].source, "Madurai");
+    strcpy(trains[4].destination, "Chennai");
+    strcpy(trains[4].departure, "06:30 AM");
+    strcpy(trains[4].arrival, "02:00 PM");
+    strcpy(trains[4].runDays, "Mon-Tue-Thu-Sat");
+    trains[4].classCount = 3;
+    c1.classId = 1; strcpy(c1.className, "Sleeper");
+    c1.totalSeats = 70; c1.availableSeats = 70; c1.fare = 320.0;
+    c2.classId = 2; strcpy(c2.className, "AC-Chair");
+    c2.totalSeats = 45; c2.availableSeats = 45; c2.fare = 600.0;
+    c3.classId = 3; strcpy(c3.className, "AC-2Tier");
+    c3.totalSeats = 25; c3.availableSeats = 25; c3.fare = 1000.0;
+    trains[4].classes[0] = c1;
+    trains[4].classes[1] = c2;
+    trains[4].classes[2] = c3;
+
+    /* Train 6 */
+    trains[5].trainId = 12006;
+    strcpy(trains[5].trainName, "Nellai Express");
+    strcpy(trains[5].source, "Chennai");
+    strcpy(trains[5].destination, "Tirunelveli");
+    strcpy(trains[5].departure, "08:00 PM");
+    strcpy(trains[5].arrival, "08:00 AM");
+    strcpy(trains[5].runDays, "Daily");
+    trains[5].classCount = 3;
+    c1.classId = 1; strcpy(c1.className, "Sleeper");
+    c1.totalSeats = 95; c1.availableSeats = 95; c1.fare = 400.0;
+    c2.classId = 2; strcpy(c2.className, "AC-3Tier");
+    c2.totalSeats = 55; c2.availableSeats = 55; c2.fare = 1050.0;
+    c3.classId = 3; strcpy(c3.className, "AC-2Tier");
+    c3.totalSeats = 35; c3.availableSeats = 35; c3.fare = 1600.0;
+    trains[5].classes[0] = c1;
+    trains[5].classes[1] = c2;
+    trains[5].classes[2] = c3;
+
+    /* Train 7 */
+    trains[6].trainId = 12007;
+    strcpy(trains[6].trainName, "Brindavan Express");
+    strcpy(trains[6].source, "Chennai");
+    strcpy(trains[6].destination, "Bangalore");
+    strcpy(trains[6].departure, "07:50 AM");
+    strcpy(trains[6].arrival, "01:00 PM");
+    strcpy(trains[6].runDays, "Daily");
+    trains[6].classCount = 3;
+    c1.classId = 1; strcpy(c1.className, "Sleeper");
+    c1.totalSeats = 75; c1.availableSeats = 75; c1.fare = 220.0;
+    c2.classId = 2; strcpy(c2.className, "AC-Chair");
+    c2.totalSeats = 60; c2.availableSeats = 60; c2.fare = 550.0;
+    c3.classId = 3; strcpy(c3.className, "AC-2Tier");
+    c3.totalSeats = 30; c3.availableSeats = 30; c3.fare = 950.0;
+    trains[6].classes[0] = c1;
+    trains[6].classes[1] = c2;
+    trains[6].classes[2] = c3;
+
+    /* Train 8 */
+    trains[7].trainId = 12008;
+    strcpy(trains[7].trainName, "Rajdhani Express");
+    strcpy(trains[7].source, "Chennai");
+    strcpy(trains[7].destination, "Delhi");
+    strcpy(trains[7].departure, "06:00 AM");
+    strcpy(trains[7].arrival, "10:00 AM+1");
+    strcpy(trains[7].runDays, "Wed-Sat");
+    trains[7].classCount = 3;
+    c1.classId = 1; strcpy(c1.className, "AC-3Tier");
+    c1.totalSeats = 80; c1.availableSeats = 80; c1.fare = 2200.0;
+    c2.classId = 2; strcpy(c2.className, "AC-2Tier");
+    c2.totalSeats = 50; c2.availableSeats = 50; c2.fare = 3200.0;
+    c3.classId = 3; strcpy(c3.className, "AC-1stClass");
+    c3.totalSeats = 20; c3.availableSeats = 20; c3.fare = 5000.0;
+    trains[7].classes[0] = c1;
+    trains[7].classes[1] = c2;
+    trains[7].classes[2] = c3;
+
+    trainCount = 8;
+    writeLog(NULL, 0, "Initialized 8 trains successfully");
+}
+
+/* ================== 1. SEARCH TRAINS ================== */
+
+void searchTrains(char *src, char *dest, char *response) {
+    char temp[512];
+    int i, j, found;
+
+    found = 0;
+    strcpy(response, "\n");
+    strcat(response, "================================================================\n");
+    strcat(response, "                  TRAIN SEARCH RESULTS                          \n");
+    strcat(response, "================================================================\n");
+
+    for (i = 0; i < trainCount; i++) {
+        if ((strcasecmp(trains[i].source, src) == 0) &&
+            (strcasecmp(trains[i].destination, dest) == 0)) {
+
+            found = 1;
+            sprintf(temp, "\n  Train ID   : %d\n", trains[i].trainId);
+            strcat(response, temp);
+            sprintf(temp, "  Train Name : %s\n", trains[i].trainName);
+            strcat(response, temp);
+            sprintf(temp, "  Route      : %s -> %s\n",
+                    trains[i].source, trains[i].destination);
+            strcat(response, temp);
+            sprintf(temp, "  Departure  : %s\n", trains[i].departure);
+            strcat(response, temp);
+            sprintf(temp, "  Arrival    : %s\n", trains[i].arrival);
+            strcat(response, temp);
+            sprintf(temp, "  Runs On    : %s\n", trains[i].runDays);
+            strcat(response, temp);
+            strcat(response, "  Classes & Fares:\n");
+
+            for (j = 0; j < trains[i].classCount; j++) {
+                sprintf(temp, "    [%d] %-12s | Seats: %3d/%3d | Rs.%.0f\n",
+                        trains[i].classes[j].classId,
+                        trains[i].classes[j].className,
+                        trains[i].classes[j].availableSeats,
+                        trains[i].classes[j].totalSeats,
+                        trains[i].classes[j].fare);
+                strcat(response, temp);
+            }
+            strcat(response, "  ------------------------------------------------------\n");
+        }
+    }
+
+    if (!found) {
+        strcat(response, "\n  No trains found from ");
+        strcat(response, src);
+        strcat(response, " to ");
+        strcat(response, dest);
+        strcat(response, "\n  Try: Chennai, Mumbai, Madurai, Coimbatore,\n");
+        strcat(response, "       Trichy, Tirunelveli, Bangalore, Delhi\n");
+    }
+    strcat(response, "================================================================\n");
+}
+
+/* ================== 2. LIST ALL TRAINS ================== */
+
+void listAllTrains(char *response) {
+    char temp[512];
+    int i, j;
+
+    strcpy(response, "\n");
+    strcat(response, "================================================================\n");
+    strcat(response, "              ALL AVAILABLE TRAINS                              \n");
+    strcat(response, "================================================================\n");
+
+    for (i = 0; i < trainCount; i++) {
+        sprintf(temp, "\n  [%d] %s\n", trains[i].trainId, trains[i].trainName);
+        strcat(response, temp);
+        sprintf(temp, "       %s -> %s | Dep: %s | Arr: %s\n",
+                trains[i].source, trains[i].destination,
+                trains[i].departure, trains[i].arrival);
+        strcat(response, temp);
+        sprintf(temp, "       Runs: %s\n", trains[i].runDays);
+        strcat(response, temp);
+
+        for (j = 0; j < trains[i].classCount; j++) {
+            sprintf(temp, "       [%d] %-12s | Avail: %3d | Rs.%.0f\n",
+                    trains[i].classes[j].classId,
+                    trains[i].classes[j].className,
+                    trains[i].classes[j].availableSeats,
+                    trains[i].classes[j].fare);
+            strcat(response, temp);
+        }
+        strcat(response, "  ------------------------------------------------------\n");
+    }
+    strcat(response, "================================================================\n");
+}
+
+/* ================== 3. CHECK SEAT AVAILABILITY ================== */
+
+void checkAvailability(int trainId, int classId, char *response) {
+    int i, j, tIdx, cIdx;
+    Train *tr;
+    TrainClass *cl;
+
+    tIdx = -1;
+    cIdx = -1;
+
+    for (i = 0; i < trainCount; i++) {
+        if (trains[i].trainId == trainId) {
+            tIdx = i;
+            break;
+        }
+    }
+
+    if (tIdx == -1) {
+        sprintf(response, "\n[ERROR] Train %d not found!\n", trainId);
+        return;
+    }
+
+    tr = &trains[tIdx];
+
+    for (j = 0; j < tr->classCount; j++) {
+        if (tr->classes[j].classId == classId) {
+            cIdx = j;
+            break;
+        }
+    }
+
+    if (cIdx == -1) {
+        sprintf(response, "\n[ERROR] Class %d not available on Train %d!\n",
+                classId, trainId);
+        return;
+    }
+
+    cl = &tr->classes[cIdx];
+
+    sprintf(response,
+            "\n================================================================\n"
+            "              SEAT AVAILABILITY                                \n"
+            "================================================================\n"
+            "  Train      : %d - %s\n"
+            "  Route      : %s -> %s\n"
+            "  Class      : %s\n"
+            "  Total Seats: %d\n"
+            "  Available  : %d\n"
+            "  Booked     : %d\n"
+            "  Fare/Ticket: Rs.%.0f\n"
+            "================================================================\n",
+            tr->trainId, tr->trainName,
+            tr->source, tr->destination,
+            cl->className,
+            cl->totalSeats,
+            cl->availableSeats,
+            cl->totalSeats - cl->availableSeats,
+            cl->fare);
+}
+
+/* ================== 4. BOOK TICKETS ================== */
+
+void bookTicket(int trainId, int classId, char *name,
+                int age, char *gender, int numTickets,
+                char *journeyDate, char *response) {
+    int i, j, tIdx, cIdx;
+    Train *tr;
+    TrainClass *cl;
+    Booking *b;
+    char logMsg[256];
+    char ts[64];
+
+    tIdx = -1;
+    cIdx = -1;
+
+    /* Validate train */
+    for (i = 0; i < trainCount; i++) {
+        if (trains[i].trainId == trainId) {
+            tIdx = i;
+            break;
+        }
+    }
+
+    if (tIdx == -1) {
+        sprintf(response, "\n[ERROR] Train %d does not exist!\n", trainId);
+        return;
+    }
+
+    tr = &trains[tIdx];
+
+    /* Validate class */
+    for (j = 0; j < tr->classCount; j++) {
+        if (tr->classes[j].classId == classId) {
+            cIdx = j;
+            break;
+        }
+    }
+
+    if (cIdx == -1) {
+        sprintf(response, "\n[ERROR] Class %d not available on this train!\n",
+                classId);
+        return;
+    }
+
+    cl = &tr->classes[cIdx];
+
+    /* Validate tickets */
+    if (numTickets <= 0 || numTickets > 6) {
+        strcpy(response, "\n[ERROR] You can book 1 to 6 tickets at a time!\n");
+        return;
+    }
+
+    /* Validate age */
+    if (age <= 0 || age > 120) {
+        strcpy(response, "\n[ERROR] Invalid age!\n");
+        return;
+    }
+
+    /* Check availability */
+    if (numTickets > cl->availableSeats) {
+        sprintf(response,
+                "\n[ERROR] Not enough seats!\n"
+                "  Requested : %d\n"
+                "  Available : %d\n"
+                "  Try fewer tickets or another class.\n",
+                numTickets, cl->availableSeats);
+        return;
+    }
+
+    /* Check booking limit */
+    if (bookingCount >= MAX_BOOKINGS) {
+        strcpy(response, "\n[ERROR] Reservation system full!\n");
+        return;
+    }
+
+    /* ---- PROCESS BOOKING ---- */
+    cl->availableSeats -= numTickets;
+
+    getTimestamp(ts, sizeof(ts));
+
+    b = &bookings[bookingCount];
+    b->pnr = nextPNR++;
+    b->trainId = trainId;
+    b->classId = classId;
+    strcpy(b->passengerName, name);
+    b->age = age;
+    strcpy(b->gender, gender);
+    b->numTickets = numTickets;
+    b->totalFare = numTickets * cl->fare;
+    strcpy(b->journeyDate, journeyDate);
+    strcpy(b->status, "CONFIRMED");
+    strcpy(b->bookingTime, ts);
+    bookingCount++;
+
+    sprintf(response,
+            "\n================================================================\n"
+            "            TICKET BOOKED SUCCESSFULLY!                        \n"
+            "================================================================\n"
+            "  PNR Number   : %d\n"
+            "  Passenger    : %s (Age: %d, %s)\n"
+            "  Train        : %d - %s\n"
+            "  Route        : %s -> %s\n"
+            "  Class        : %s\n"
+            "  Journey Date : %s\n"
+            "  Departure    : %s\n"
+            "  Arrival      : %s\n"
+            "  Tickets      : %d\n"
+            "  Fare/Ticket  : Rs.%.0f\n"
+            "  Total Fare   : Rs.%.0f\n"
+            "  Status       : CONFIRMED\n"
+            "  Booked At    : %s\n"
+            "================================================================\n"
+            "  ** Please note your PNR: %d **\n"
+            "================================================================\n",
+            b->pnr, b->passengerName, b->age, b->gender,
+            tr->trainId, tr->trainName,
+            tr->source, tr->destination,
+            cl->className,
+            b->journeyDate,
+            tr->departure, tr->arrival,
+            b->numTickets,
+            cl->fare, b->totalFare,
+            b->bookingTime,
+            b->pnr);
+
+    sprintf(logMsg, "BOOKED PNR#%d: %s - Train %d %s - %d tickets Rs.%.0f",
+            b->pnr, name, trainId, cl->className,
+            numTickets, b->totalFare);
+    writeLog(NULL, 0, logMsg);
+
+    saveDatabase();
+}
+
+/* ================== 5. CANCEL RESERVATION ================== */
+
+void cancelReservation(int pnr, char *response) {
+    int i, found;
+    Train *tr;
+    TrainClass *cl;
+    char logMsg[256];
+
+    found = -1;
+
+    for (i = 0; i < bookingCount; i++) {
+        if (bookings[i].pnr == pnr) {
+            found = i;
+            break;
+        }
+    }
+
+    if (found == -1) {
+        sprintf(response, "\n[ERROR] PNR %d not found!\n", pnr);
+        return;
+    }
+
+    if (strcmp(bookings[found].status, "CANCELLED") == 0) {
+        strcpy(response, "\n[ERROR] This booking is already cancelled!\n");
+        return;
+    }
+
+    /* Restore seats */
+    for (i = 0; i < trainCount; i++) {
+        if (trains[i].trainId == bookings[found].trainId) {
+            int j;
+            for (j = 0; j < trains[i].classCount; j++) {
+                if (trains[i].classes[j].classId == bookings[found].classId) {
+                    trains[i].classes[j].availableSeats += bookings[found].numTickets;
+                    break;
+                }
+            }
+            tr = &trains[i];
+            break;
+        }
+    }
+
+    strcpy(bookings[found].status, "CANCELLED");
+
+    sprintf(response,
+            "\n================================================================\n"
+            "          RESERVATION CANCELLED                                \n"
+            "================================================================\n"
+            "  PNR Number   : %d\n"
+            "  Passenger    : %s\n"
+            "  Train        : %d - %s\n"
+            "  Tickets      : %d (restored)\n"
+            "  Refund       : Rs.%.0f\n"
+            "  Status       : CANCELLED\n"
+            "================================================================\n",
+            bookings[found].pnr,
+            bookings[found].passengerName,
+            bookings[found].trainId,
+            tr->trainName,
+            bookings[found].numTickets,
+            bookings[found].totalFare);
+
+    sprintf(logMsg, "CANCELLED PNR#%d: %s - Refund Rs.%.0f",
+            pnr, bookings[found].passengerName,
+            bookings[found].totalFare);
+    writeLog(NULL, 0, logMsg);
+
+    saveDatabase();
+}
+
+/* ================== 6. VIEW BOOKING STATUS ================== */
+
+void viewBookingStatus(int pnr, char *response) {
+    int i, found;
+    Train *tr;
+
+    found = -1;
+
+    for (i = 0; i < bookingCount; i++) {
+        if (bookings[i].pnr == pnr) {
+            found = i;
+            break;
+        }
+    }
+
+    if (found == -1) {
+        sprintf(response, "\n[ERROR] PNR %d not found!\n", pnr);
+        return;
+    }
+
+    /* Find train name */
+    tr = NULL;
+    for (i = 0; i < trainCount; i++) {
+        if (trains[i].trainId == bookings[found].trainId) {
+            tr = &trains[i];
+            break;
+        }
+    }
+
+    sprintf(response,
+            "\n================================================================\n"
+            "              PNR STATUS                                       \n"
+            "================================================================\n"
+            "  PNR Number   : %d\n"
+            "  Status       : %s\n"
+            "  Passenger    : %s (Age: %d, %s)\n"
+            "  Train        : %d - %s\n"
+            "  Route        : %s -> %s\n"
+            "  Journey Date : %s\n"
+            "  Tickets      : %d\n"
+            "  Total Fare   : Rs.%.0f\n"
+            "  Booked At    : %s\n"
+            "================================================================\n",
+            bookings[found].pnr,
+            bookings[found].status,
+            bookings[found].passengerName,
+            bookings[found].age,
+            bookings[found].gender,
+            bookings[found].trainId,
+            tr ? tr->trainName : "Unknown",
+            tr ? tr->source : "?",
+            tr ? tr->destination : "?",
+            bookings[found].journeyDate,
+            bookings[found].numTickets,
+            bookings[found].totalFare,
+            bookings[found].bookingTime);
+}
+
+/* ================== PROCESS REQUEST ================== */
+
+void processRequest(char *request, char *response,
+                    const char *clientIP, int clientPort) {
+    int choice;
+    char logMsg[256];
+
+    sscanf(request, "%d", &choice);
+
+    switch (choice) {
+        case 1: {
+            /* Search trains by route */
+            char src[40], dest[40];
+            sscanf(request, "%d %s %s", &choice, src, dest);
+            sprintf(logMsg, "Search: %s -> %s", src, dest);
+            writeLog(clientIP, clientPort, logMsg);
+            searchTrains(src, dest, response);
+            break;
+        }
+        case 2: {
+            /* List all trains */
+            writeLog(clientIP, clientPort, "List all trains");
+            listAllTrains(response);
+            break;
+        }
+        case 3: {
+            /* Check seat availability */
+            int tid, cid;
+            sscanf(request, "%d %d %d", &choice, &tid, &cid);
+            sprintf(logMsg, "Check availability: Train %d Class %d", tid, cid);
+            writeLog(clientIP, clientPort, logMsg);
+            checkAvailability(tid, cid, response);
+            break;
+        }
+        case 4: {
+            /* Book ticket */
+            int tid, cid, age, num;
+            char name[100], gender[10], jdate[20];
+            sscanf(request, "%d %d %d %s %d %s %d %s",
+                   &choice, &tid, &cid, name, &age,
+                   gender, &num, jdate);
+            sprintf(logMsg, "Book: %s Train-%d Class-%d x%d",
+                    name, tid, cid, num);
+            writeLog(clientIP, clientPort, logMsg);
+            bookTicket(tid, cid, name, age, gender, num, jdate, response);
+            break;
+        }
+        case 5: {
+            /* Cancel reservation */
+            int pnr;
+            sscanf(request, "%d %d", &choice, &pnr);
+            sprintf(logMsg, "Cancel PNR: %d", pnr);
+            writeLog(clientIP, clientPort, logMsg);
+            cancelReservation(pnr, response);
+            break;
+        }
+        case 6: {
+            /* View booking status */
+            int pnr;
+            sscanf(request, "%d %d", &choice, &pnr);
+            sprintf(logMsg, "PNR Status: %d", pnr);
+            writeLog(clientIP, clientPort, logMsg);
+            viewBookingStatus(pnr, response);
+            break;
+        }
+        case 7: {
+            writeLog(clientIP, clientPort, "Client exiting");
+            strcpy(response,
+                   "\n  Thank you for using Railway Reservation!\n"
+                   "  Have a safe journey!\n");
+            break;
+        }
+        default:
+            strcpy(response, "\n[ERROR] Invalid option! Choose 1-7.\n");
+            break;
+    }
+}
+
+/* ================== MAIN SERVER ================== */
+
+int main() {
+    int serverFd, clientFd;
+    struct sockaddr_in serverAddr, clientAddr;
+    socklen_t clientLen;
+    char buffer[BUFFER_SIZE];
+    char response[BUFFER_SIZE];
+    int opt = 1;
+    int n, ch;
+    char clientIP[INET_ADDRSTRLEN];
+    int clientPort;
+    char logMsg[256];
+
+    /* Initialize */
+    initializeTrains();
+    saveDatabase();
+
+    /* Create socket */
+    serverFd = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverFd < 0) {
+        perror("Socket failed");
+        exit(1);
+    }
+
+    setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(PORT);
+
+    if (bind(serverFd, (struct sockaddr *)&serverAddr,
+             sizeof(serverAddr)) < 0) {
+        perror("Bind failed");
+        close(serverFd);
+        exit(1);
+    }
+
+    if (listen(serverFd, 5) < 0) {
+        perror("Listen failed");
+        close(serverFd);
+        exit(1);
+    }
+
+    printf("================================================================\n");
+    printf("     ONLINE RAILWAY RESERVATION SERVER (ITERATIVE)             \n");
+    printf("     Port: %d | Mode: One client at a time                     \n", PORT);
+    printf("     Log: %s | DB: %s                                          \n",
+           LOG_FILE, DB_FILE);
+    printf("     Trains: %d loaded                                         \n", trainCount);
+    printf("================================================================\n\n");
+
+    writeLog(NULL, 0, "Server started - ITERATIVE mode");
+
+    /* ---- ITERATIVE: One client at a time ---- */
+    while (1) {
+        clientLen = sizeof(clientAddr);
+
+        printf("[SERVER] Waiting for next client...\n");
+
+        clientFd = accept(serverFd,
+                          (struct sockaddr *)&clientAddr,
+                          &clientLen);
+
+        if (clientFd < 0) {
+            perror("Accept failed");
+            continue;
+        }
+
+        strcpy(clientIP, inet_ntoa(clientAddr.sin_addr));
+        clientPort = ntohs(clientAddr.sin_port);
+
+        sprintf(logMsg, "Client connected");
+        writeLog(clientIP, clientPort, logMsg);
+
+        /* Handle this ONE client completely */
+        while (1) {
+            memset(buffer, 0, BUFFER_SIZE);
+            memset(response, 0, BUFFER_SIZE);
+
+            n = read(clientFd, buffer, BUFFER_SIZE - 1);
+            if (n <= 0) {
+                sprintf(logMsg, "Client disconnected");
+                writeLog(clientIP, clientPort, logMsg);
+                break;
+            }
+            buffer[n] = '\0';
+
+            processRequest(buffer, response, clientIP, clientPort);
+
+            write(clientFd, response, strlen(response));
+
+            sscanf(buffer, "%d", &ch);
+            if (ch == 7) {
+                break;
+            }
+        }
+
+        close(clientFd);
+        printf("[SERVER] Client session ended. Ready for next.\n\n");
+    }
+
+    close(serverFd);
+    return 0;
+}
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+#define PORT 8080
+#define BUFFER_SIZE 4096
+#define SERVER_IP "127.0.0.1"
+
+void displayMenu() {
+    printf("\n");
+    printf("================================================================\n");
+    printf("        ONLINE RAILWAY RESERVATION SYSTEM                      \n");
+    printf("================================================================\n");
+    printf("  1. Search Trains (by route)\n");
+    printf("  2. View All Trains\n");
+    printf("  3. Check Seat Availability\n");
+    printf("  4. Book Ticket\n");
+    printf("  5. Cancel Reservation\n");
+    printf("  6. View Booking Status (PNR)\n");
+    printf("  7. Exit\n");
+    printf("================================================================\n");
+    printf("  Enter your choice: ");
+}
+
+int main() {
+    int sockFd;
+    struct sockaddr_in serverAddr;
+    char buffer[BUFFER_SIZE];
+    char response[BUFFER_SIZE];
+    int choice, n;
+    int trainId, classId, age, numTickets, pnr;
+    char name[100], gender[10], src[40], dest[40], jdate[20];
+
+    sockFd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockFd < 0) {
+        perror("Socket failed");
+        exit(1);
+    }
+
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(PORT);
+    inet_pton(AF_INET, SERVER_IP, &serverAddr.sin_addr);
+
+    if (connect(sockFd, (struct sockaddr *)&serverAddr,
+                sizeof(serverAddr)) < 0) {
+        perror("Connection failed! Start the server first");
+        close(sockFd);
+        exit(1);
+    }
+
+    printf("\n================================================================\n");
+    printf("   Connected to Railway Reservation Server!                    \n");
+    printf("================================================================\n");
+
+    while (1) {
+        displayMenu();
+        scanf("%d", &choice);
+
+        memset(buffer, 0, BUFFER_SIZE);
+        memset(response, 0, BUFFER_SIZE);
+
+        switch (choice) {
+            case 1:
+                printf("\n  Enter Source Station: ");
+                scanf("%s", src);
+                printf("  Enter Destination Station: ");
+                scanf("%s", dest);
+                sprintf(buffer, "1 %s %s", src, dest);
+                break;
+
+            case 2:
+                sprintf(buffer, "2");
+                break;
+
+            case 3:
+                printf("\n  Enter Train ID: ");
+                scanf("%d", &trainId);
+                printf("  Enter Class ID (1/2/3): ");
+                scanf("%d", &classId);
+                sprintf(buffer, "3 %d %d", trainId, classId);
+                break;
+
+            case 4:
+                printf("\n  ---- TICKET BOOKING ----\n");
+                printf("  Enter Train ID: ");
+                scanf("%d", &trainId);
+                printf("  Enter Class ID (1/2/3): ");
+                scanf("%d", &classId);
+                printf("  Enter Passenger Name: ");
+                scanf("%s", name);
+                printf("  Enter Age: ");
+                scanf("%d", &age);
+                printf("  Enter Gender (Male/Female): ");
+                scanf("%s", gender);
+                printf("  Enter Number of Tickets (1-6): ");
+                scanf("%d", &numTickets);
+                printf("  Enter Journey Date (DD/MM/YYYY): ");
+                scanf("%s", jdate);
+                sprintf(buffer, "4 %d %d %s %d %s %d %s",
+                        trainId, classId, name, age,
+                        gender, numTickets, jdate);
+                break;
+
+            case 5:
+                printf("\n  Enter PNR Number to cancel: ");
+                scanf("%d", &pnr);
+                sprintf(buffer, "5 %d", pnr);
+                break;
+
+            case 6:
+                printf("\n  Enter PNR Number: ");
+                scanf("%d", &pnr);
+                sprintf(buffer, "6 %d", pnr);
+                break;
+
+            case 7:
+                sprintf(buffer, "7");
+                write(sockFd, buffer, strlen(buffer));
+                memset(response, 0, BUFFER_SIZE);
+                read(sockFd, response, BUFFER_SIZE - 1);
+                printf("%s", response);
+                printf("\nGoodbye!\n\n");
+                close(sockFd);
+                return 0;
+
+            default:
+                printf("\n[ERROR] Invalid choice! Choose 1-7.\n");
+                continue;
+        }
+
+        /* Send */
+        write(sockFd, buffer, strlen(buffer));
+
+        /* Receive */
+        memset(response, 0, BUFFER_SIZE);
+        n = read(sockFd, response, BUFFER_SIZE - 1);
+        if (n <= 0) {
+            printf("\n[ERROR] Server disconnected!\n");
+            break;
+        }
+        response[n] = '\0';
+        printf("%s", response);
+    }
+
+    close(sockFd);
+    return 0;
+}
